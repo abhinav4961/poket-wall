@@ -1,12 +1,19 @@
 import socket
 import threading
-from firewall import is_blocked
+from firewall import is_blocked, check_flood, log
 
 HOST = "0.0.0.0"
 PORT = 3128
 
 def handle_client(client_sock, client_addr):
+    ip = client_addr[0]
     try:
+        # Flood check
+        if check_flood(ip):
+            log.warning(f"[{ip}] FLOOD BLOCKED")
+            client_sock.send(b"HTTP/1.1 429 Too Many Requests\r\n\r\nBlocked by Pi-Wall: flood detected\r\n")
+            return
+
         request = client_sock.recv(4096).decode(errors="ignore")
         if not request:
             return
@@ -17,26 +24,23 @@ def handle_client(client_sock, client_addr):
 
         # Parse host
         if method == "CONNECT":
-            host = url  # e.g. youtube.com:443
+            host = url
         else:
-            # e.g. http://example.com/path
             host = url.split("/")[2] if "/" in url else url
 
-        print(f"[{client_addr[0]}] {method} {host}", end=" ")
-
+        # Blacklist check
         if is_blocked(host):
-            print("-> BLOCKED")
+            log.info(f"[{ip}] {method} {host} -> BLOCKED")
             client_sock.send(b"HTTP/1.1 403 Forbidden\r\n\r\nBlocked by Pi-Wall\r\n")
             return
 
-        print("-> ALLOWED")
+        log.info(f"[{ip}] {method} {host} -> ALLOWED")
 
-        # HTTPS tunnel (CONNECT method)
+        # HTTPS tunnel
         if method == "CONNECT":
             dest_host, dest_port = host.split(":") if ":" in host else (host, 443)
             server_sock = socket.create_connection((dest_host, int(dest_port)), timeout=10)
             client_sock.send(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-            # Pipe both directions
             pipe(client_sock, server_sock)
 
         # Plain HTTP
@@ -48,7 +52,7 @@ def handle_client(client_sock, client_addr):
             pipe(client_sock, server_sock)
 
     except Exception as e:
-        print(f"  error: {e}")
+        log.error(f"[{ip}] error: {e}")
     finally:
         client_sock.close()
 
@@ -76,7 +80,7 @@ def main():
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, PORT))
     server.listen(100)
-    print(f"Pi-Wall proxy listening on {HOST}:{PORT}")
+    log.info(f"Pi-Wall proxy listening on {HOST}:{PORT}")
 
     while True:
         client_sock, client_addr = server.accept()
