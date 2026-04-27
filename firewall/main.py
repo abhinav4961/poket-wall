@@ -1,6 +1,11 @@
+import argparse
+import curses
 import socket
+import sys
 import threading
 from firewall import is_blocked, check_flood, log
+from ids import IDSEngine, load_api_key
+from tui import TUI
 
 HOST = "0.0.0.0"
 PORT = 3128
@@ -9,10 +14,32 @@ active_connections = {}
 conn_lock = threading.Lock()
 MAX_CONN = 10
 
+# Global IDS engine — initialised in main()
+ids_engine: IDSEngine | None = None
+# Global TUI ref for log bridging
+tui_ref: TUI | None = None
+
+
+def start_api(engine):
+    """Start the REST API in a thread."""
+    from api import start_api_server
+    start_api_server(engine)
+
 
 def handle_client(client_sock, client_addr):
     ip = client_addr[0]
     client_sock.settimeout(5)
+
+    # --- IDS check ---
+    if ids_engine:
+        verdict = ids_engine.check_ip(ip)
+        if verdict == "BLOCK":
+            log.warning(f"[IDS] {ip} BLOCKED (threat score / geo)")
+            try:
+                client_sock.send(b"HTTP/1.1 403 Forbidden\r\n\r\nBlocked by Pocket-Wall IDS\r\n")
+            finally:
+                client_sock.close()
+            return
 
     # --- Flood check BEFORE touching connection counter ---
     if check_flood(ip):
@@ -117,7 +144,8 @@ def pipe(a, b):
     t.join(timeout=2)
 
 
-def main():
+def start_proxy():
+    """Start the proxy server (runs forever)."""
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, PORT))
@@ -127,6 +155,56 @@ def main():
     while True:
         c, addr = server.accept()
         threading.Thread(target=handle_client, args=(c, addr), daemon=True).start()
+
+
+def main():
+    global ids_engine, tui_ref
+
+    parser = argparse.ArgumentParser(description="Pocket-Wall Firewall + IDS")
+    parser.add_argument("--tui", action="store_true", help="Launch with TUI dashboard")
+    parser.add_argument("--web", action="store_true", help="Launch with React web dashboard (API on :5000)")
+    parser.add_argument("--no-ids", action="store_true", help="Disable IDS engine")
+    args = parser.parse_args()
+
+    # Load API key and init IDS
+    if not args.no_ids:
+        api_key = load_api_key()
+        if api_key:
+            ids_engine = IDSEngine(api_key)
+            log.info("[IDS] Engine initialised with AbuseIPDB integration")
+        else:
+            log.warning("[IDS] No API key found in .env — IDS disabled")
+
+    if args.web:
+        # Start proxy in background thread
+        proxy_thread = threading.Thread(target=start_proxy, daemon=True)
+        proxy_thread.start()
+
+        # Start Flask API (blocks main thread)
+        log.info("[WEB] Starting REST API on port 5000")
+        start_api(ids_engine)
+
+    elif args.tui:
+        if ids_engine is None:
+            print("ERROR: IDS engine required for TUI. Check your .env file for abuse_ipdb_api_key")
+            sys.exit(1)
+
+        # Start proxy in background thread
+        proxy_thread = threading.Thread(target=start_proxy, daemon=True)
+        proxy_thread.start()
+
+        # Run TUI in main thread
+        tui = TUI(ids_engine)
+        tui_ref = tui
+        try:
+            curses.wrapper(tui.run)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            log.info("Shutting down...")
+    else:
+        # Classic mode — just run proxy with log output
+        start_proxy()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,5 @@
+{
+  "blocked_countries": [],
+  "score_threshold_block": 75,
+  "score_threshold_warn": 40
+}

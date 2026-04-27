@@ -39,7 +39,8 @@ def _fetch_and_cache(name, url):
         age = time.time() - os.path.getmtime(cache_file)
         if age < CACHE_TTL:
             log.info(f"[blocklist] using cached {name}")
-            return open(cache_file).read()
+            with open(cache_file) as f:
+                return f.read()
 
     try:
         log.info(f"[blocklist] downloading {name}")
@@ -53,7 +54,8 @@ def _fetch_and_cache(name, url):
     except Exception as e:
         log.warning(f"[blocklist] failed {name}: {e}")
         if os.path.exists(cache_file):
-            return open(cache_file).read()
+            with open(cache_file) as f:
+                return f.read()
         return ""
 
 
