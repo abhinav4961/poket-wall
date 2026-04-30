@@ -1,21 +1,24 @@
 """
-IDS Engine — AbuseIPDB integration + threat scoring + iptables blocking.
+IDS Engine — AbuseIPDB integration + threat scoring + nftables blocking.
 """
 
 import ipaddress
 import json
 import os
+import shutil
 import subprocess
 import time
 import urllib.request
 import urllib.error
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from threading import Lock
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 GEO_RULES_PATH = os.path.join(BASE_DIR, "geo_rules.json")
 ENV_PATH = os.path.join(BASE_DIR, ".env")
+BLOCKED_IPS_FILE = os.path.join(BASE_DIR, "blocked_ips.json")
+CACHE_TTL = 86400  # 24 hours for persistent block log
 
 
 @dataclass
@@ -86,16 +89,159 @@ class AbuseIPDBChecker:
             return result
 
         except urllib.error.HTTPError as e:
-            print(f"[IDS] AbuseIPDB HTTP error {e.code}: {e.read().decode()}")
+            error_body = e.read().decode()
+            if e.code == 429:
+                print(f"[IDS] AbuseIPDB rate limited — skipping remaining checks")
+            else:
+                print(f"[IDS] AbuseIPDB HTTP {e.code}: {error_body}")
             return None
         except Exception as e:
             print(f"[IDS] AbuseIPDB error: {e}")
             return None
 
 
+class IPBlocker:
+    """Handles actual IP blocking via nftables, iptables, or in-memory only."""
+
+    TABLE_NAME = "pocket_wall"
+    SET_NAME = "blocked"
+
+    def __init__(self):
+        self._method = None
+        self._detect_method()
+
+    def _detect_method(self):
+        if shutil.which("nft") and self._test_nftables():
+            self._method = "nftables"
+        elif shutil.which("iptables") and self._test_iptables():
+            self._method = "iptables"
+        else:
+            self._method = "memory"
+            print("[IDS] No root access — using in-memory blocking only")
+
+    def _test_nftables(self) -> bool:
+        try:
+            r = subprocess.run(
+                ["nft", "add", "table", "inet", self.TABLE_NAME],
+                capture_output=True, timeout=5
+            )
+            if r.returncode == 0:
+                subprocess.run(
+                    ["nft", "delete", "table", "inet", self.TABLE_NAME],
+                    capture_output=True, timeout=5
+                )
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _test_iptables(self) -> bool:
+        try:
+            test_ip = "192.0.2.1"
+            r = subprocess.run(
+                ["iptables", "-C", "INPUT", "-s", test_ip, "-j", "DROP"],
+                capture_output=True, timeout=5
+            )
+            if r.returncode == 0:
+                return True
+            r = subprocess.run(
+                ["iptables", "-A", "INPUT", "-s", test_ip, "-j", "DROP"],
+                capture_output=True, timeout=5
+            )
+            subprocess.run(
+                ["iptables", "-D", "INPUT", "-s", test_ip, "-j", "DROP"],
+                capture_output=True, timeout=5
+            )
+            return r.returncode == 0
+        except Exception:
+            pass
+        return False
+
+    def block(self, ip: str) -> bool:
+        if self._method == "nftables":
+            return self._nft_block(ip)
+        elif self._method == "iptables":
+            return self._ipt_block(ip)
+        return True  # in-memory always succeeds
+
+    def unblock(self, ip: str) -> bool:
+        if self._method == "nftables":
+            return self._nft_unblock(ip)
+        elif self._method == "iptables":
+            return self._ipt_unblock(ip)
+        return True
+
+    def _nft_ensure_set(self):
+        subprocess.run(
+            ["nft", "add", "table", "inet", self.TABLE_NAME],
+            capture_output=True, timeout=5
+        )
+        subprocess.run(
+            ["nft", "add", "set", "inet", self.TABLE_NAME, self.SET_NAME,
+             "{ type ipv4_addr; flags timeout; timeout 24h; }"],
+            capture_output=True, timeout=5
+        )
+
+    def _nft_block(self, ip: str) -> bool:
+        try:
+            self._nft_ensure_set()
+            subprocess.run(
+                ["nft", "add", "element", "inet", self.TABLE_NAME, self.SET_NAME,
+                 f"{{ {ip} }}"],
+                capture_output=True, timeout=5
+            )
+            subprocess.run(
+                ["nft", "add", "rule", "inet", self.TABLE_NAME, "input",
+                 f"ip saddr @pocket_wall_{self.SET_NAME} drop"],
+                capture_output=True, timeout=5
+            )
+            return True
+        except Exception:
+            return False
+
+    def _nft_unblock(self, ip: str) -> bool:
+        try:
+            subprocess.run(
+                ["nft", "delete", "element", "inet", self.TABLE_NAME, self.SET_NAME,
+                 f"{{ {ip} }}"],
+                capture_output=True, timeout=5
+            )
+            return True
+        except Exception:
+            return False
+
+    def _ipt_block(self, ip: str) -> bool:
+        try:
+            subprocess.run(
+                ["iptables", "-C", "INPUT", "-s", ip, "-j", "DROP"],
+                capture_output=True, timeout=5
+            )
+            r = subprocess.run(
+                ["iptables", "-A", "INPUT", "-s", ip, "-j", "DROP"],
+                capture_output=True, timeout=5
+            )
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    def _ipt_unblock(self, ip: str) -> bool:
+        try:
+            subprocess.run(
+                ["iptables", "-D", "INPUT", "-s", ip, "-j", "DROP"],
+                capture_output=True, timeout=5
+            )
+            return True
+        except Exception:
+            return False
+
+    def get_method(self) -> str:
+        return self._method
+
+
 class IDSEngine:
     def __init__(self, api_key: str):
         self.checker = AbuseIPDBChecker(api_key)
+        self.blocker = IPBlocker()
         self._lock = Lock()
 
         self.events: deque[IDSEvent] = deque(maxlen=500)
@@ -103,6 +249,7 @@ class IDSEngine:
         self.stats = IDSStats()
 
         self._blocked_ips: set[str] = set()
+        self._load_persistent_blocks()
 
         self.blocked_countries: set[str] = set()
         self.threshold_block = 75
@@ -134,6 +281,36 @@ class IDSEngine:
                 json.dump(cfg, f, indent=2)
         except Exception:
             pass
+
+    def _load_persistent_blocks(self):
+        """Load previously blocked IPs from disk (expire after CACHE_TTL)."""
+        if not os.path.exists(BLOCKED_IPS_FILE):
+            return
+        try:
+            with open(BLOCKED_IPS_FILE) as f:
+                data = json.load(f)
+            now = time.time()
+            for entry in data.get("blocks", []):
+                if now - entry["timestamp"] < entry.get("ttl", CACHE_TTL):
+                    self._blocked_ips.add(entry["ip"])
+            print(f"[IDS] Loaded {len(self._blocked_ips)} persistent blocks")
+        except Exception as e:
+            print(f"[IDS] Failed to load persistent blocks: {e}")
+
+    def _save_persistent_blocks(self):
+        """Save blocked IPs to disk."""
+        try:
+            now = time.time()
+            data = {
+                "blocks": [
+                    {"ip": ip, "timestamp": now, "ttl": CACHE_TTL}
+                    for ip in self._blocked_ips
+                ]
+            }
+            with open(BLOCKED_IPS_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(f"[IDS] Failed to save persistent blocks: {e}")
 
     def add_country(self, code: str):
         self.blocked_countries.add(code.upper())
@@ -199,10 +376,21 @@ class IDSEngine:
         )
 
         if action == "BLOCK":
-            self._iptables_block(ip)
+            self._block_ip(ip)
 
         self._record(ev)
         return action
+
+    def _block_ip(self, ip: str):
+        if ip in self._blocked_ips:
+            return
+        self._blocked_ips.add(ip)
+        self._save_persistent_blocks()
+        success = self.blocker.block(ip)
+        if success:
+            print(f"[IDS] Blocked {ip} via {self.blocker.get_method()}")
+        else:
+            print(f"[IDS] System-level block failed for {ip} — in-memory only")
 
     def _record(self, ev: IDSEvent):
         with self._lock:
@@ -217,31 +405,10 @@ class IDSEngine:
             else:
                 self.stats.allowed += 1
 
-    def _iptables_block(self, ip: str):
-        if ip in self._blocked_ips:
-            return
-        try:
-            subprocess.run(
-                ["iptables", "-A", "INPUT", "-s", ip, "-j", "DROP"],
-                timeout=5,
-                capture_output=True,
-            )
-            self._blocked_ips.add(ip)
-        except Exception:
-            pass
-
     def unblock_ip(self, ip: str):
-        if ip not in self._blocked_ips:
-            return
-        try:
-            subprocess.run(
-                ["iptables", "-D", "INPUT", "-s", ip, "-j", "DROP"],
-                timeout=5,
-                capture_output=True,
-            )
-            self._blocked_ips.discard(ip)
-        except Exception:
-            pass
+        self._blocked_ips.discard(ip)
+        self._save_persistent_blocks()
+        self.blocker.unblock(ip)
 
     def get_blocked_ips(self) -> list[str]:
         return sorted(self._blocked_ips)
@@ -267,3 +434,29 @@ def load_api_key() -> str:
     except Exception as e:
         print(f"[IDS] Error reading .env: {e}")
     return ""
+
+
+def test_api_key(ip: str = "1.1.1.1"):
+    """Test the AbuseIPDB API against a known public IP."""
+    api_key = load_api_key()
+    if not api_key:
+        print("[TEST] No API key found in .env")
+        return
+
+    print(f"[TEST] API key loaded ({api_key[:8]}...)")
+    print(f"[TEST] Querying AbuseIPDB for {ip}...")
+
+    checker = AbuseIPDBChecker(api_key)
+    result = checker.check(ip)
+
+    if result is None:
+        print(f"[TEST] No result — IP may be private or API error")
+        return
+
+    print(f"\n[TEST] Result for {ip}:")
+    print(f"  Score:       {result['confidence_score']}%")
+    print(f"  Country:     {result['country_code']}")
+    print(f"  ISP:         {result['isp']}")
+    print(f"  Reports:     {result['total_reports']}")
+    print(f"  Tor:         {result['is_tor']}")
+    print(f"\n[TEST] API is working correctly!")

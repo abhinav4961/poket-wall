@@ -4,7 +4,7 @@ import socket
 import sys
 import threading
 from firewall import is_blocked, check_flood, log
-from ids import IDSEngine, load_api_key
+from ids import IDSEngine, load_api_key, test_api_key
 from tui import TUI
 
 HOST = "0.0.0.0"
@@ -164,14 +164,19 @@ def main():
     parser.add_argument("--tui", action="store_true", help="Launch with TUI dashboard")
     parser.add_argument("--web", action="store_true", help="Launch with React web dashboard (API on :5000)")
     parser.add_argument("--no-ids", action="store_true", help="Disable IDS engine")
+    parser.add_argument("--test-ids", metavar="IP", nargs="?", const="1.1.1.1", help="Test AbuseIPDB API against a public IP and exit")
     args = parser.parse_args()
+
+    if args.test_ids:
+        test_api_key(args.test_ids)
+        sys.exit(0)
 
     # Load API key and init IDS
     if not args.no_ids:
         api_key = load_api_key()
         if api_key:
             ids_engine = IDSEngine(api_key)
-            log.info("[IDS] Engine initialised with AbuseIPDB integration")
+            log.info(f"[IDS] Engine initialised (block method: {ids_engine.blocker.get_method()})")
         else:
             log.warning("[IDS] No API key found in .env — IDS disabled")
 
