@@ -13,6 +13,11 @@ from collections import deque
 from dataclasses import dataclass, field
 from threading import Lock
 
+# Resolve paths relative to project root
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(BASE_DIR)
+GEO_RULES_PATH = os.path.join(PROJECT_ROOT, "geo_rules.json")
+
 # --------------- data structures ---------------
 
 @dataclass
@@ -103,7 +108,7 @@ class AbuseIPDBChecker:
 class IDSEngine:
     """Central IDS decision-maker. Thread-safe."""
 
-    def __init__(self, api_key: str, config_path: str = "geo_rules.json"):
+    def __init__(self, api_key: str, config_path: str = GEO_RULES_PATH):
         self.checker = AbuseIPDBChecker(api_key)
         self.config_path = config_path
         self._lock = Lock()

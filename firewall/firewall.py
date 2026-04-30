@@ -6,6 +6,11 @@ import urllib.request
 from collections import defaultdict
 from threading import Lock
 
+# Resolve paths relative to project root
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(BASE_DIR)
+RULES_PATH = os.path.join(PROJECT_ROOT, "rules.json")
+
 # ------------------ LOGGING ------------------
 os.makedirs("logs", exist_ok=True)
 
@@ -83,7 +88,7 @@ def build_blacklist():
         domains.update(parsed)
 
     try:
-        with open("rules.json") as f:
+        with open(RULES_PATH) as f:
             data = json.load(f)
             local = set(d.lower() for d in data.get("blacklist", []))
             domains.update(local)
