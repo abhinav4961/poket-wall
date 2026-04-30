@@ -6,6 +6,10 @@ import urllib.request
 from collections import defaultdict
 from threading import Lock
 
+# Resolve paths relative to script directory
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+RULES_PATH = os.path.join(BASE_DIR, "rules.json")
+
 # ------------------ LOGGING ------------------
 os.makedirs("logs", exist_ok=True)
 
@@ -39,7 +43,8 @@ def _fetch_and_cache(name, url):
         age = time.time() - os.path.getmtime(cache_file)
         if age < CACHE_TTL:
             log.info(f"[blocklist] using cached {name}")
-            return open(cache_file).read()
+            with open(cache_file) as f:
+                return f.read()
 
     try:
         log.info(f"[blocklist] downloading {name}")
@@ -53,7 +58,8 @@ def _fetch_and_cache(name, url):
     except Exception as e:
         log.warning(f"[blocklist] failed {name}: {e}")
         if os.path.exists(cache_file):
-            return open(cache_file).read()
+            with open(cache_file) as f:
+                return f.read()
         return ""
 
 
@@ -81,7 +87,7 @@ def build_blacklist():
         domains.update(parsed)
 
     try:
-        with open("rules.json") as f:
+        with open(RULES_PATH) as f:
             data = json.load(f)
             local = set(d.lower() for d in data.get("blacklist", []))
             domains.update(local)
