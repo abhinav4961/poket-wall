@@ -17,26 +17,38 @@ MAX_CONN = 10
 ids_engine: IDSEngine | None = None
 tui_ref: TUI | None = None
 
+DEBUG_PROXY = True
+
 
 def start_api(engine):
     from api import start_api_server
     start_api_server(engine)
 
 
+def _debug(msg):
+    if DEBUG_PROXY:
+        log.info(f"[DEBUG] {msg}")
+
+
 def _recv_full_request(sock):
     """Read complete HTTP request headers."""
     data = b""
-    sock.settimeout(5)
+    sock.settimeout(10)
     try:
         while True:
             chunk = sock.recv(4096)
             if not chunk:
+                _debug("recv returned empty bytes")
                 break
             data += chunk
+            _debug(f"recv {len(chunk)} bytes, total {len(data)}")
             if b"\r\n\r\n" in data:
+                _debug("headers complete")
                 break
     except socket.timeout:
-        pass
+        _debug("recv timed out")
+    except Exception as e:
+        _debug(f"recv error: {e}")
     return data.decode(errors="ignore")
 
 
@@ -77,7 +89,10 @@ def handle_client(client_sock, client_addr):
         return
 
     try:
+        _debug(f"calling _recv_full_request for {ip}")
         request = _recv_full_request(client_sock)
+        _debug(f"got request ({len(request)} chars): {request[:100]!r}")
+
         if not request:
             log.warning(f"[{ip}] empty request, closing")
             return
@@ -100,6 +115,7 @@ def handle_client(client_sock, client_addr):
             try:
                 host = url.split("/")[2]
             except IndexError:
+                _debug(f"cannot parse host from url: {url}")
                 return
 
         host_no_port = host.split(":")[0]
