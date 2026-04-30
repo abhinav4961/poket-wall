@@ -61,13 +61,18 @@ class AbuseIPDBChecker:
         self._lock = Lock()
 
     def check(self, ip: str) -> dict | None:
+        print(f"[CHECKER-DEBUG] check({ip})")
         try:
             addr = ipaddress.ip_address(ip)
+            print(f"[CHECKER-DEBUG] is_private={addr.is_private}, is_loopback={addr.is_loopback}")
             if addr.is_private or addr.is_loopback or addr.is_link_local:
+                print(f"[CHECKER-DEBUG] private IP, returning None")
                 return None
-        except ValueError:
+        except ValueError as e:
+            print(f"[CHECKER-DEBUG] ValueError: {e}")
             return None
 
+        print(f"[CHECKER-DEBUG] checking cache")
         with self._lock:
             if ip in self._cache:
                 ts, data = self._cache[ip]
@@ -344,10 +349,14 @@ class IDSEngine:
         self.save_config()
 
     def check_ip(self, ip: str) -> str:
+        print(f"[IDS-DEBUG] check_ip called for {ip}")
         if ip in self._blocked_ips:
+            print(f"[IDS-DEBUG] {ip} in blocked_ips, returning BLOCK")
             return "BLOCK"
 
+        print(f"[IDS-DEBUG] calling checker.check({ip})")
         result = self.checker.check(ip)
+        print(f"[IDS-DEBUG] checker.check returned: {result}")
 
         geo_blocked = False
         reputation_score = 0.0

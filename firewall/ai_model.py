@@ -76,10 +76,12 @@ class FeatureExtractor:
             self._protocol_anomalies[ip] += 1
 
     def get_features(self, ip: str) -> dict[str, float]:
+        print(f"[FEAT-DEBUG] get_features for {ip}")
         now = time.time()
         window_start = now - self.WINDOW_SEC
 
         with self._lock:
+            print(f"[FEAT-DEBUG] acquired lock for {ip}")
             conns = self._connections[ip]
             while conns and conns[0] < window_start:
                 conns.popleft()
@@ -306,8 +308,11 @@ class AIEngine:
         self.extractor.record_protocol_anomaly(ip)
 
     def check_ip(self, ip: str, reputation_score: float = 0.0, geo_blocked: bool = False) -> tuple[str, str, float]:
+        print(f"[AI-DEBUG] check_ip called for {ip}")
         features = self.extractor.get_feature_vector(ip)
+        print(f"[AI-DEBUG] got features for {ip}")
         ai_score = self.model.score(features)
+        print(f"[AI-DEBUG] score={ai_score} for {ip}")
         self.baseline.add_score(ai_score)
         self.extractor.update_score(ip, ai_score)
 
@@ -318,6 +323,7 @@ class AIEngine:
         verdict, reason, combined = self.decision.combine(
             ai_score, reputation_score, geo_blocked, behavior_anomaly
         )
+        print(f"[AI-DEBUG] verdict={verdict} for {ip}")
 
         return verdict, reason, combined
 
