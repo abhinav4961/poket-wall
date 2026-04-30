@@ -6,10 +6,9 @@ import urllib.request
 from collections import defaultdict
 from threading import Lock
 
-# Resolve paths relative to project root
+# Resolve paths relative to script directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(BASE_DIR)
-RULES_PATH = os.path.join(PROJECT_ROOT, "rules.json")
+RULES_PATH = os.path.join(BASE_DIR, "rules.json")
 
 # ------------------ LOGGING ------------------
 os.makedirs("logs", exist_ok=True)

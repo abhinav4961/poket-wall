@@ -13,10 +13,9 @@ from collections import deque
 from dataclasses import dataclass, field
 from threading import Lock
 
-# Resolve paths relative to project root
+# Resolve paths relative to script directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(BASE_DIR)
-GEO_RULES_PATH = os.path.join(PROJECT_ROOT, "geo_rules.json")
+GEO_RULES_PATH = os.path.join(BASE_DIR, "geo_rules.json")
 
 # --------------- data structures ---------------
 
