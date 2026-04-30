@@ -14,7 +14,13 @@ from collections import deque
 from dataclasses import dataclass
 from threading import Lock
 
-from ai_model import AIEngine
+try:
+    from ai_model import AIEngine
+    AI_AVAILABLE = True
+except ImportError as e:
+    print(f"[IDS] AI module not available: {e}")
+    AI_AVAILABLE = False
+    AIEngine = None
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 GEO_RULES_PATH = os.path.join(BASE_DIR, "geo_rules.json")
@@ -239,8 +245,16 @@ class IDSEngine:
     def __init__(self, api_key: str):
         self.checker = AbuseIPDBChecker(api_key)
         self.blocker = IPBlocker()
-        self.ai = AIEngine()
         self._lock = Lock()
+
+        if AI_AVAILABLE:
+            try:
+                self.ai = AIEngine()
+            except Exception as e:
+                print(f"[IDS] AI engine failed to initialise: {e}")
+                self.ai = None
+        else:
+            self.ai = None
 
         self.events: deque[IDSEvent] = deque(maxlen=500)
         self.alerts: deque[IDSEvent] = deque(maxlen=200)
@@ -310,13 +324,16 @@ class IDSEngine:
 
     def record_traffic(self, ip: str, dest_port: int = 0, dest_host: str = "",
                        request: str = "", request_len: int = 0):
-        self.ai.record(ip, dest_port, dest_host, request, request_len)
+        if self.ai:
+            self.ai.record(ip, dest_port, dest_host, request, request_len)
 
     def record_error(self, ip: str):
-        self.ai.record_error(ip)
+        if self.ai:
+            self.ai.record_error(ip)
 
     def record_anomaly(self, ip: str):
-        self.ai.record_anomaly(ip)
+        if self.ai:
+            self.ai.record_anomaly(ip)
 
     def add_country(self, code: str):
         self.blocked_countries.add(code.upper())
@@ -352,9 +369,14 @@ class IDSEngine:
             if country in self.blocked_countries:
                 geo_blocked = True
 
-        ai_verdict, ai_reason, ai_combined = self.ai.check_ip(
-            ip, reputation_score, geo_blocked
-        )
+        if self.ai:
+            ai_verdict, ai_reason, ai_combined = self.ai.check_ip(
+                ip, reputation_score, geo_blocked
+            )
+        else:
+            ai_verdict = "ALLOW"
+            ai_reason = "No AI engine"
+            ai_combined = 0.0
 
         final_action = "ALLOW"
         reason = ""
@@ -433,10 +455,14 @@ class IDSEngine:
             self.alerts.clear()
 
     def get_ai_stats(self) -> dict:
-        return self.ai.get_ai_stats()
+        if self.ai:
+            return self.ai.get_ai_stats()
+        return {"error": "AI engine not available"}
 
     def get_ip_ai_details(self, ip: str) -> dict:
-        return self.ai.get_ip_details(ip)
+        if self.ai:
+            return self.ai.get_ip_details(ip)
+        return {"error": "AI engine not available"}
 
 
 def load_api_key() -> str:

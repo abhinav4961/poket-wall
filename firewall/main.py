@@ -24,15 +24,19 @@ def start_api(engine):
 
 
 def _recv_full_request(sock):
-    """Read complete HTTP request (headers only, no body for proxy purposes)."""
+    """Read complete HTTP request headers."""
     data = b""
-    while True:
-        chunk = sock.recv(4096)
-        if not chunk:
-            break
-        data += chunk
-        if b"\r\n\r\n" in data:
-            break
+    sock.settimeout(5)
+    try:
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            if b"\r\n\r\n" in data:
+                break
+    except socket.timeout:
+        pass
     return data.decode(errors="ignore")
 
 
@@ -75,10 +79,12 @@ def handle_client(client_sock, client_addr):
     try:
         request = _recv_full_request(client_sock)
         if not request:
+            log.warning(f"[{ip}] empty request, closing")
             return
 
         first_line = request.split("\n")[0].split()
         if len(first_line) < 2:
+            log.warning(f"[{ip}] malformed request: {first_line}")
             if ids_engine:
                 ids_engine.record_anomaly(ip)
             return
@@ -113,6 +119,7 @@ def handle_client(client_sock, client_addr):
                 dest_port = int(dest_port)
             except ValueError:
                 dest_port = 443
+            log.info(f"[{ip}] CONNECT {dest_host}:{dest_port}")
             server = socket.create_connection((dest_host, dest_port), timeout=15)
             client_sock.settimeout(None)
             client_sock.send(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -120,6 +127,7 @@ def handle_client(client_sock, client_addr):
         else:
             dest_host = host_no_port
             dest_port = int(host.split(":")[1]) if ":" in host else 80
+            log.info(f"[{ip}] HTTP {dest_host}:{dest_port}")
             server = socket.create_connection((dest_host, dest_port), timeout=10)
             server.sendall(request.encode())
             _proxy_http_response(client_sock, server, ip)
@@ -146,51 +154,17 @@ def handle_client(client_sock, client_addr):
 
 
 def _proxy_http_response(client_sock, server, ip):
-    """Forward HTTP response from server to client. Handles chunked and content-length."""
+    """Forward HTTP response from server to client."""
     try:
-        response = b""
         while True:
             chunk = server.recv(4096)
             if not chunk:
                 break
-            response += chunk
             client_sock.sendall(chunk)
-            if _response_complete(response):
-                break
     except Exception as e:
         log.error(f"[{ip}] proxy error: {e}")
     finally:
         server.close()
-
-
-def _response_complete(data: bytes) -> bool:
-    """Check if we've received a complete HTTP response."""
-    try:
-        header_end = data.find(b"\r\n\r\n")
-        if header_end == -1:
-            return False
-
-        headers = data[:header_end].decode("ascii", errors="ignore").lower()
-
-        content_length = None
-        for line in headers.split("\r\n"):
-            if line.startswith("content-length:"):
-                content_length = int(line.split(":")[1].strip())
-                break
-
-        if content_length is not None:
-            body = data[header_end + 4:]
-            return len(body) >= content_length
-
-        if "transfer-encoding: chunked" in headers:
-            return data.endswith(b"0\r\n\r\n")
-
-        if "connection: close" in headers:
-            return False
-
-        return len(data) > header_end + 4
-    except Exception:
-        return False
 
 
 def _pipe_bidirectional(a, b):
@@ -227,6 +201,7 @@ def start_proxy():
 
     while True:
         c, addr = server.accept()
+        log.info(f"[{addr[0]}:{addr[1]}] new connection")
         threading.Thread(target=handle_client, args=(c, addr), daemon=True).start()
 
 
@@ -248,7 +223,9 @@ def main():
         api_key = load_api_key()
         if api_key:
             ids_engine = IDSEngine(api_key)
-            log.info(f"[IDS] Engine initialised (block: {ids_engine.blocker.get_method()})")
+            block_method = ids_engine.blocker.get_method()
+            ai_status = "AI ready" if ids_engine.ai else "AI disabled"
+            log.info(f"[IDS] Engine initialised (block: {block_method}, {ai_status})")
         else:
             log.warning("[IDS] No API key found in .env — IDS disabled")
 
