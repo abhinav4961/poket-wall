@@ -14,14 +14,11 @@ active_connections = {}
 conn_lock = threading.Lock()
 MAX_CONN = 10
 
-# Global IDS engine — initialised in main()
 ids_engine: IDSEngine | None = None
-# Global TUI ref for log bridging
 tui_ref: TUI | None = None
 
 
 def start_api(engine):
-    """Start the REST API in a thread."""
     from api import start_api_server
     start_api_server(engine)
 
@@ -30,18 +27,17 @@ def handle_client(client_sock, client_addr):
     ip = client_addr[0]
     client_sock.settimeout(5)
 
-    # --- IDS check ---
     if ids_engine:
+        ids_engine.record_traffic(ip)
         verdict = ids_engine.check_ip(ip)
         if verdict == "BLOCK":
-            log.warning(f"[IDS] {ip} BLOCKED (threat score / geo)")
+            log.warning(f"[IDS] {ip} BLOCKED (threat score / geo / AI)")
             try:
                 client_sock.send(b"HTTP/1.1 403 Forbidden\r\n\r\nBlocked by Pocket-Wall IDS\r\n")
             finally:
                 client_sock.close()
             return
 
-    # --- Flood check BEFORE touching connection counter ---
     if check_flood(ip):
         try:
             client_sock.send(b"HTTP/1.1 429 Too Many Requests\r\n\r\n")
@@ -49,7 +45,6 @@ def handle_client(client_sock, client_addr):
             client_sock.close()
         return
 
-    # --- Increment, reject if over limit ---
     with conn_lock:
         active_connections[ip] = active_connections.get(ip, 0) + 1
         over_limit = active_connections[ip] > MAX_CONN
@@ -71,25 +66,29 @@ def handle_client(client_sock, client_addr):
 
         first_line = request.split("\n")[0].split()
         if len(first_line) < 2:
+            if ids_engine:
+                ids_engine.record_anomaly(ip)
             return
 
         method, url = first_line[0], first_line[1]
 
-        # Parse target host
+        if ids_engine:
+            ids_engine.record_traffic(ip, request=request, request_len=len(request))
+
         if method == "CONNECT":
-            host = url  # host:port
+            host = url
         else:
-            # http://host/path  →  split off scheme, take netloc
             try:
                 host = url.split("/")[2]
             except IndexError:
                 return
 
-        # Strip port for blocklist check
         host_no_port = host.split(":")[0]
 
         if is_blocked(host_no_port):
             log.info(f"[{ip}] {host_no_port} BLOCKED")
+            if ids_engine:
+                ids_engine.record_error(ip)
             client_sock.send(b"HTTP/1.1 403 Forbidden\r\n\r\n")
             return
 
@@ -117,7 +116,6 @@ def handle_client(client_sock, client_addr):
 
 
 def pipe(a, b):
-    """Bidirectional relay. Blocks until BOTH directions are done."""
     done = threading.Event()
 
     def forward(src, dst):
@@ -130,7 +128,6 @@ def pipe(a, b):
         except Exception:
             pass
         finally:
-            # Signal the other direction to stop by closing the write-end
             try:
                 dst.shutdown(socket.SHUT_WR)
             except Exception:
@@ -140,12 +137,11 @@ def pipe(a, b):
     t = threading.Thread(target=forward, args=(b, a), daemon=True)
     t.start()
     forward(a, b)
-    done.wait()   # wait for the reverse direction before returning
+    done.wait()
     t.join(timeout=2)
 
 
 def start_proxy():
-    """Start the proxy server (runs forever)."""
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, PORT))
@@ -171,21 +167,17 @@ def main():
         test_api_key(args.test_ids)
         sys.exit(0)
 
-    # Load API key and init IDS
     if not args.no_ids:
         api_key = load_api_key()
         if api_key:
             ids_engine = IDSEngine(api_key)
-            log.info(f"[IDS] Engine initialised (block method: {ids_engine.blocker.get_method()})")
+            log.info(f"[IDS] Engine initialised (block: {ids_engine.blocker.get_method()})")
         else:
             log.warning("[IDS] No API key found in .env — IDS disabled")
 
     if args.web:
-        # Start proxy in background thread
         proxy_thread = threading.Thread(target=start_proxy, daemon=True)
         proxy_thread.start()
-
-        # Start Flask API (blocks main thread)
         log.info("[WEB] Starting REST API on port 5000")
         start_api(ids_engine)
 
@@ -194,11 +186,9 @@ def main():
             print("ERROR: IDS engine required for TUI. Check your .env file for abuse_ipdb_api_key")
             sys.exit(1)
 
-        # Start proxy in background thread
         proxy_thread = threading.Thread(target=start_proxy, daemon=True)
         proxy_thread.start()
 
-        # Run TUI in main thread
         tui = TUI(ids_engine)
         tui_ref = tui
         try:
@@ -208,7 +198,6 @@ def main():
         finally:
             log.info("Shutting down...")
     else:
-        # Classic mode — just run proxy with log output
         start_proxy()
 
 

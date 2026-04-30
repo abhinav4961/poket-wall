@@ -1,5 +1,5 @@
 """
-IDS Engine — AbuseIPDB integration + threat scoring + nftables blocking.
+IDS Engine — AbuseIPDB + nftables + AI behavioral detection.
 """
 
 import ipaddress
@@ -14,11 +14,13 @@ from collections import deque
 from dataclasses import dataclass
 from threading import Lock
 
+from ai_model import AIEngine
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 GEO_RULES_PATH = os.path.join(BASE_DIR, "geo_rules.json")
 ENV_PATH = os.path.join(BASE_DIR, ".env")
 BLOCKED_IPS_FILE = os.path.join(BASE_DIR, "blocked_ips.json")
-CACHE_TTL = 86400  # 24 hours for persistent block log
+CACHE_TTL = 86400
 
 
 @dataclass
@@ -32,6 +34,7 @@ class IDSEvent:
     reason: str
     total_reports: int = 0
     is_tor: bool = False
+    ai_score: float = 0.0
 
 
 @dataclass
@@ -91,7 +94,7 @@ class AbuseIPDBChecker:
         except urllib.error.HTTPError as e:
             error_body = e.read().decode()
             if e.code == 429:
-                print(f"[IDS] AbuseIPDB rate limited — skipping remaining checks")
+                print(f"[IDS] AbuseIPDB rate limited")
             else:
                 print(f"[IDS] AbuseIPDB HTTP {e.code}: {error_body}")
             return None
@@ -101,8 +104,6 @@ class AbuseIPDBChecker:
 
 
 class IPBlocker:
-    """Handles actual IP blocking via nftables, iptables, or in-memory only."""
-
     TABLE_NAME = "pocket_wall"
     SET_NAME = "blocked"
 
@@ -162,7 +163,7 @@ class IPBlocker:
             return self._nft_block(ip)
         elif self._method == "iptables":
             return self._ipt_block(ip)
-        return True  # in-memory always succeeds
+        return True
 
     def unblock(self, ip: str) -> bool:
         if self._method == "nftables":
@@ -212,10 +213,6 @@ class IPBlocker:
 
     def _ipt_block(self, ip: str) -> bool:
         try:
-            subprocess.run(
-                ["iptables", "-C", "INPUT", "-s", ip, "-j", "DROP"],
-                capture_output=True, timeout=5
-            )
             r = subprocess.run(
                 ["iptables", "-A", "INPUT", "-s", ip, "-j", "DROP"],
                 capture_output=True, timeout=5
@@ -242,6 +239,7 @@ class IDSEngine:
     def __init__(self, api_key: str):
         self.checker = AbuseIPDBChecker(api_key)
         self.blocker = IPBlocker()
+        self.ai = AIEngine()
         self._lock = Lock()
 
         self.events: deque[IDSEvent] = deque(maxlen=500)
@@ -283,7 +281,6 @@ class IDSEngine:
             pass
 
     def _load_persistent_blocks(self):
-        """Load previously blocked IPs from disk (expire after CACHE_TTL)."""
         if not os.path.exists(BLOCKED_IPS_FILE):
             return
         try:
@@ -298,7 +295,6 @@ class IDSEngine:
             print(f"[IDS] Failed to load persistent blocks: {e}")
 
     def _save_persistent_blocks(self):
-        """Save blocked IPs to disk."""
         try:
             now = time.time()
             data = {
@@ -311,6 +307,16 @@ class IDSEngine:
                 json.dump(data, f, indent=2)
         except Exception as e:
             print(f"[IDS] Failed to save persistent blocks: {e}")
+
+    def record_traffic(self, ip: str, dest_port: int = 0, dest_host: str = "",
+                       request: str = "", request_len: int = 0):
+        self.ai.record(ip, dest_port, dest_host, request, request_len)
+
+    def record_error(self, ip: str):
+        self.ai.record_error(ip)
+
+    def record_anomaly(self, ip: str):
+        self.ai.record_anomaly(ip)
 
     def add_country(self, code: str):
         self.blocked_countries.add(code.upper())
@@ -326,39 +332,47 @@ class IDSEngine:
 
         result = self.checker.check(ip)
 
+        geo_blocked = False
+        reputation_score = 0.0
+        country = "LAN"
+        isp = "Local"
+        total_reports = 0
+        is_tor = False
+        rep_score = 0
+
         if result is None:
-            ev = IDSEvent(
-                timestamp=time.time(),
-                ip=ip,
-                score=0,
-                country="LAN",
-                isp="Local",
-                action="ALLOW",
-                reason="Private/local IP",
-            )
-            self._record(ev)
-            return "ALLOW"
+            rep_score = 0
+        else:
+            rep_score = result["confidence_score"]
+            country = result["country_code"]
+            isp = result["isp"]
+            total_reports = result["total_reports"]
+            is_tor = result["is_tor"]
+            reputation_score = rep_score / 100.0
+            if country in self.blocked_countries:
+                geo_blocked = True
 
-        score = result["confidence_score"]
-        country = result["country_code"]
-        isp = result["isp"]
-        total_reports = result["total_reports"]
-        is_tor = result["is_tor"]
+        ai_verdict, ai_reason, ai_combined = self.ai.check_ip(
+            ip, reputation_score, geo_blocked
+        )
 
-        action = "ALLOW"
+        final_action = "ALLOW"
         reason = ""
 
-        if country in self.blocked_countries:
-            action = "BLOCK"
-            reason = f"Geo-blocked country: {country}"
-        elif score >= self.threshold_block:
-            action = "BLOCK"
-            reason = f"High threat score: {score}%"
-        elif score >= self.threshold_warn:
-            action = "WARN"
-            reason = f"Moderate threat score: {score}%"
+        if ai_verdict == "BLOCK" or geo_blocked:
+            final_action = "BLOCK"
+            reason = ai_reason if not geo_blocked else f"Geo-blocked: {country}"
+        elif ai_verdict == "WARN":
+            final_action = "WARN"
+            reason = ai_reason
+        elif rep_score >= self.threshold_block:
+            final_action = "BLOCK"
+            reason = f"High threat score: {rep_score}%"
+        elif rep_score >= self.threshold_warn:
+            final_action = "WARN"
+            reason = f"Moderate threat score: {rep_score}%"
         elif is_tor:
-            action = "WARN"
+            final_action = "WARN"
             reason = "TOR exit node"
         else:
             reason = "Clean"
@@ -366,20 +380,21 @@ class IDSEngine:
         ev = IDSEvent(
             timestamp=time.time(),
             ip=ip,
-            score=score,
+            score=rep_score,
             country=country,
             isp=isp,
-            action=action,
+            action=final_action,
             reason=reason,
             total_reports=total_reports,
             is_tor=is_tor,
+            ai_score=ai_combined,
         )
 
-        if action == "BLOCK":
+        if final_action == "BLOCK":
             self._block_ip(ip)
 
         self._record(ev)
-        return action
+        return final_action
 
     def _block_ip(self, ip: str):
         if ip in self._blocked_ips:
@@ -417,9 +432,14 @@ class IDSEngine:
         with self._lock:
             self.alerts.clear()
 
+    def get_ai_stats(self) -> dict:
+        return self.ai.get_ai_stats()
+
+    def get_ip_ai_details(self, ip: str) -> dict:
+        return self.ai.get_ip_details(ip)
+
 
 def load_api_key() -> str:
-    """Load API key from .env file in the same directory as this script."""
     try:
         with open(ENV_PATH) as f:
             for line in f:
@@ -437,7 +457,6 @@ def load_api_key() -> str:
 
 
 def test_api_key(ip: str = "1.1.1.1"):
-    """Test the AbuseIPDB API against a known public IP."""
     api_key = load_api_key()
     if not api_key:
         print("[TEST] No API key found in .env")

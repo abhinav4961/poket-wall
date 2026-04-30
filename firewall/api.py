@@ -17,7 +17,7 @@ from firewall import _request_times, _banned_ips, FLOOD_THRESHOLD, FLOOD_BAN_DUR
 # These get set by main.py before the server starts
 ids_engine = None
 
-RULES_FILE = os.path.join(os.path.dirname(__file__), "..", "rules.json")
+RULES_FILE = os.path.join(os.path.dirname(__file__), "rules.json")
 LOG_FILE = os.path.join(os.path.dirname(__file__), "logs", "piwall.log")
 
 
@@ -27,6 +27,7 @@ def _event_to_dict(ev):
         "time": time.strftime("%H:%M:%S", time.localtime(ev.timestamp)),
         "ip": ev.ip,
         "score": ev.score,
+        "ai_score": round(ev.ai_score, 3) if hasattr(ev, "ai_score") else 0.0,
         "country": ev.country,
         "isp": ev.isp,
         "action": ev.action,
@@ -100,6 +101,10 @@ class APIHandler(BaseHTTPRequestHandler):
             self._handle_logs(query)
         elif path == "/api/flood-status":
             self._handle_flood_status()
+        elif path == "/api/ai-stats":
+            self._handle_ai_stats()
+        elif path == "/api/ai-ip":
+            self._handle_ai_ip(query)
         else:
             self._send_json({"error": "Not found"}, 404)
 
@@ -247,6 +252,19 @@ class APIHandler(BaseHTTPRequestHandler):
             "ban_duration": FLOOD_BAN_DURATION,
             "banned_ips": [{"ip": ip, "expires_in": int(exp - now)} for ip, exp in banned.items()],
         })
+
+    def _handle_ai_stats(self):
+        if ids_engine is None:
+            return self._send_json({"error": "IDS not running"}, 503)
+        self._send_json(ids_engine.get_ai_stats())
+
+    def _handle_ai_ip(self, query):
+        if ids_engine is None:
+            return self._send_json({"error": "IDS not running"}, 503)
+        ip = query.get("ip", "")
+        if not ip:
+            return self._send_json({"error": "No IP provided"}, 400)
+        self._send_json(ids_engine.get_ip_ai_details(ip))
 
 
 # ─────────────────── SERVER ───────────────────
