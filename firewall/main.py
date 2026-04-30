@@ -31,7 +31,6 @@ def _debug(msg):
 
 
 def _recv_full_request(sock):
-    """Read complete HTTP request headers."""
     data = b""
     sock.settimeout(10)
     try:
@@ -54,41 +53,44 @@ def _recv_full_request(sock):
 
 def handle_client(client_sock, client_addr):
     ip = client_addr[0]
-    client_sock.settimeout(5)
+    try:
+        _debug(f"handle_client started for {ip}")
+        client_sock.settimeout(5)
 
-    if ids_engine:
-        ids_engine.record_traffic(ip)
-        verdict = ids_engine.check_ip(ip)
-        if verdict == "BLOCK":
-            log.warning(f"[IDS] {ip} BLOCKED (threat score / geo / AI)")
+        if ids_engine:
+            _debug(f"checking IDS for {ip}")
+            ids_engine.record_traffic(ip)
+            verdict = ids_engine.check_ip(ip)
+            _debug(f"IDS verdict for {ip}: {verdict}")
+            if verdict == "BLOCK":
+                log.warning(f"[IDS] {ip} BLOCKED (threat score / geo / AI)")
+                try:
+                    client_sock.send(b"HTTP/1.1 403 Forbidden\r\n\r\nBlocked by Pocket-Wall IDS\r\n")
+                finally:
+                    client_sock.close()
+                return
+
+        if check_flood(ip):
             try:
-                client_sock.send(b"HTTP/1.1 403 Forbidden\r\n\r\nBlocked by Pocket-Wall IDS\r\n")
+                client_sock.send(b"HTTP/1.1 429 Too Many Requests\r\n\r\n")
             finally:
                 client_sock.close()
             return
 
-    if check_flood(ip):
-        try:
-            client_sock.send(b"HTTP/1.1 429 Too Many Requests\r\n\r\n")
-        finally:
-            client_sock.close()
-        return
+        with conn_lock:
+            active_connections[ip] = active_connections.get(ip, 0) + 1
+            over_limit = active_connections[ip] > MAX_CONN
 
-    with conn_lock:
-        active_connections[ip] = active_connections.get(ip, 0) + 1
-        over_limit = active_connections[ip] > MAX_CONN
+        if over_limit:
+            log.warning(f"[{ip}] too many connections ({active_connections[ip]})")
+            try:
+                client_sock.send(b"HTTP/1.1 429 Too Many Requests\r\n\r\n")
+            finally:
+                client_sock.close()
+                with conn_lock:
+                    active_connections[ip] -= 1
+            return
 
-    if over_limit:
-        log.warning(f"[{ip}] too many connections ({active_connections[ip]})")
-        try:
-            client_sock.send(b"HTTP/1.1 429 Too Many Requests\r\n\r\n")
-        finally:
-            client_sock.close()
-            with conn_lock:
-                active_connections[ip] -= 1
-        return
-
-    try:
         _debug(f"calling _recv_full_request for {ip}")
         request = _recv_full_request(client_sock)
         _debug(f"got request ({len(request)} chars): {request[:100]!r}")
@@ -170,7 +172,6 @@ def handle_client(client_sock, client_addr):
 
 
 def _proxy_http_response(client_sock, server, ip):
-    """Forward HTTP response from server to client."""
     try:
         while True:
             chunk = server.recv(4096)
@@ -184,7 +185,6 @@ def _proxy_http_response(client_sock, server, ip):
 
 
 def _pipe_bidirectional(a, b):
-    """Bidirectional pipe for HTTPS (CONNECT) tunnels."""
     def forward(src, dst):
         try:
             while True:
@@ -214,6 +214,14 @@ def start_proxy():
     server.bind((HOST, PORT))
     server.listen(200)
     log.info(f"Proxy running on {PORT}")
+
+    _debug("testing outbound connectivity...")
+    try:
+        test = socket.create_connection(("1.1.1.1", 53), timeout=5)
+        test.close()
+        _debug("outbound connectivity: OK")
+    except Exception as e:
+        log.warning(f"outbound connectivity test FAILED: {e}")
 
     while True:
         c, addr = server.accept()
