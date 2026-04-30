@@ -3,6 +3,7 @@ import curses
 import socket
 import sys
 import threading
+import time
 from firewall import is_blocked, check_flood, log
 from ids import IDSEngine, load_api_key, test_api_key
 from tui import TUI
@@ -17,17 +18,10 @@ MAX_CONN = 10
 ids_engine: IDSEngine | None = None
 tui_ref: TUI | None = None
 
-DEBUG_PROXY = True
-
 
 def start_api(engine):
     from api import start_api_server
     start_api_server(engine)
-
-
-def _debug(msg):
-    if DEBUG_PROXY:
-        log.info(f"[DEBUG] {msg}")
 
 
 def _recv_full_request(sock):
@@ -37,39 +31,36 @@ def _recv_full_request(sock):
         while True:
             chunk = sock.recv(4096)
             if not chunk:
-                _debug("recv returned empty bytes")
                 break
             data += chunk
-            _debug(f"recv {len(chunk)} bytes, total {len(data)}")
             if b"\r\n\r\n" in data:
-                _debug("headers complete")
                 break
     except socket.timeout:
-        _debug("recv timed out")
-    except Exception as e:
-        _debug(f"recv error: {e}")
+        pass
     return data.decode(errors="ignore")
+
+
+def _ids_check_async(ip, request=""):
+    """Run IDS analysis in background — never blocks the proxy."""
+    if not ids_engine:
+        return
+    try:
+        ids_engine.record_traffic(ip, request=request, request_len=len(request))
+        verdict = ids_engine.check_ip(ip)
+        if verdict == "BLOCK":
+            log.warning(f"[IDS] {ip} BLOCKED (background analysis)")
+            if ip in ids_engine._blocked_ips:
+                pass  # already blocked, next connection will be rejected
+    except Exception as e:
+        log.error(f"[IDS] background check error: {e}")
 
 
 def handle_client(client_sock, client_addr):
     ip = client_addr[0]
     try:
-        _debug(f"handle_client started for {ip}")
         client_sock.settimeout(5)
 
-        if ids_engine:
-            _debug(f"checking IDS for {ip}")
-            ids_engine.record_traffic(ip)
-            verdict = ids_engine.check_ip(ip)
-            _debug(f"IDS verdict for {ip}: {verdict}")
-            if verdict == "BLOCK":
-                log.warning(f"[IDS] {ip} BLOCKED (threat score / geo / AI)")
-                try:
-                    client_sock.send(b"HTTP/1.1 403 Forbidden\r\n\r\nBlocked by Pocket-Wall IDS\r\n")
-                finally:
-                    client_sock.close()
-                return
-
+        # Flood check — fast, no locks
         if check_flood(ip):
             try:
                 client_sock.send(b"HTTP/1.1 429 Too Many Requests\r\n\r\n")
@@ -91,46 +82,39 @@ def handle_client(client_sock, client_addr):
                     active_connections[ip] -= 1
             return
 
-        _debug(f"calling _recv_full_request for {ip}")
         request = _recv_full_request(client_sock)
-        _debug(f"got request ({len(request)} chars): {request[:100]!r}")
-
         if not request:
-            log.warning(f"[{ip}] empty request, closing")
             return
 
         first_line = request.split("\n")[0].split()
         if len(first_line) < 2:
-            log.warning(f"[{ip}] malformed request: {first_line}")
-            if ids_engine:
-                ids_engine.record_anomaly(ip)
             return
 
         method, url = first_line[0], first_line[1]
 
-        if ids_engine:
-            ids_engine.record_traffic(ip, request=request, request_len=len(request))
-
+        # Parse host
         if method == "CONNECT":
             host = url
         else:
             try:
                 host = url.split("/")[2]
             except IndexError:
-                _debug(f"cannot parse host from url: {url}")
                 return
 
         host_no_port = host.split(":")[0]
 
+        # Blocklist check — fast dict lookup
         if is_blocked(host_no_port):
             log.info(f"[{ip}] {host_no_port} BLOCKED")
-            if ids_engine:
-                ids_engine.record_error(ip)
             client_sock.send(b"HTTP/1.1 403 Forbidden\r\n\r\n")
             return
 
         log.info(f"[{ip}] {host_no_port} ALLOWED")
 
+        # Spawn IDS analysis in background — never blocks forwarding
+        threading.Thread(target=_ids_check_async, args=(ip, request), daemon=True).start()
+
+        # Forward traffic
         if method == "CONNECT":
             dest_host, dest_port = (host.split(":") + ["443"])[:2]
             try:
@@ -215,14 +199,6 @@ def start_proxy():
     server.listen(200)
     log.info(f"Proxy running on {PORT}")
 
-    _debug("testing outbound connectivity...")
-    try:
-        test = socket.create_connection(("1.1.1.1", 53), timeout=5)
-        test.close()
-        _debug("outbound connectivity: OK")
-    except Exception as e:
-        log.warning(f"outbound connectivity test FAILED: {e}")
-
     while True:
         c, addr = server.accept()
         log.info(f"[{addr[0]}:{addr[1]}] new connection")
@@ -250,6 +226,7 @@ def main():
             block_method = ids_engine.blocker.get_method()
             ai_status = "AI ready" if ids_engine.ai else "AI disabled"
             log.info(f"[IDS] Engine initialised (block: {block_method}, {ai_status})")
+            log.info("[IDS] Analysis runs in background — does not block traffic")
         else:
             log.warning("[IDS] No API key found in .env — IDS disabled")
 

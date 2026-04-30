@@ -1,5 +1,6 @@
 """
-IDS Engine — AbuseIPDB + nftables + AI behavioral detection.
+IDS Engine — AbuseIPDB + nftables + AI batch analysis.
+AI runs as a background log analyzer, not per-connection.
 """
 
 import ipaddress
@@ -40,7 +41,6 @@ class IDSEvent:
     reason: str
     total_reports: int = 0
     is_tor: bool = False
-    ai_score: float = 0.0
 
 
 @dataclass
@@ -61,18 +61,13 @@ class AbuseIPDBChecker:
         self._lock = Lock()
 
     def check(self, ip: str) -> dict | None:
-        print(f"[CHECKER-DEBUG] check({ip})")
         try:
             addr = ipaddress.ip_address(ip)
-            print(f"[CHECKER-DEBUG] is_private={addr.is_private}, is_loopback={addr.is_loopback}")
             if addr.is_private or addr.is_loopback or addr.is_link_local:
-                print(f"[CHECKER-DEBUG] private IP, returning None")
                 return None
-        except ValueError as e:
-            print(f"[CHECKER-DEBUG] ValueError: {e}")
+        except ValueError:
             return None
 
-        print(f"[CHECKER-DEBUG] checking cache")
         with self._lock:
             if ip in self._cache:
                 ts, data = self._cache[ip]
@@ -254,7 +249,8 @@ class IDSEngine:
 
         if AI_AVAILABLE:
             try:
-                self.ai = AIEngine()
+                self.ai = AIEngine(analysis_interval=60)
+                self.ai.start_background()
             except Exception as e:
                 print(f"[IDS] AI engine failed to initialise: {e}")
                 self.ai = None
@@ -349,17 +345,12 @@ class IDSEngine:
         self.save_config()
 
     def check_ip(self, ip: str) -> str:
-        print(f"[IDS-DEBUG] check_ip called for {ip}")
+        """Fast check: only persistent blocks + cached AbuseIPDB. AI runs in background."""
         if ip in self._blocked_ips:
-            print(f"[IDS-DEBUG] {ip} in blocked_ips, returning BLOCK")
             return "BLOCK"
 
-        print(f"[IDS-DEBUG] calling checker.check({ip})")
         result = self.checker.check(ip)
-        print(f"[IDS-DEBUG] checker.check returned: {result}")
 
-        geo_blocked = False
-        reputation_score = 0.0
         country = "LAN"
         isp = "Local"
         total_reports = 0
@@ -367,46 +358,33 @@ class IDSEngine:
         rep_score = 0
 
         if result is None:
-            rep_score = 0
+            action = "ALLOW"
+            reason = "Private/local IP"
         else:
             rep_score = result["confidence_score"]
             country = result["country_code"]
             isp = result["isp"]
             total_reports = result["total_reports"]
             is_tor = result["is_tor"]
-            reputation_score = rep_score / 100.0
+
             if country in self.blocked_countries:
-                geo_blocked = True
+                action = "BLOCK"
+                reason = f"Geo-blocked: {country}"
+            elif rep_score >= self.threshold_block:
+                action = "BLOCK"
+                reason = f"High threat score: {rep_score}%"
+            elif rep_score >= self.threshold_warn:
+                action = "WARN"
+                reason = f"Moderate threat score: {rep_score}%"
+            elif is_tor:
+                action = "WARN"
+                reason = "TOR exit node"
+            else:
+                action = "ALLOW"
+                reason = "Clean"
 
-        if self.ai:
-            ai_verdict, ai_reason, ai_combined = self.ai.check_ip(
-                ip, reputation_score, geo_blocked
-            )
-        else:
-            ai_verdict = "ALLOW"
-            ai_reason = "No AI engine"
-            ai_combined = 0.0
-
-        final_action = "ALLOW"
-        reason = ""
-
-        if ai_verdict == "BLOCK" or geo_blocked:
-            final_action = "BLOCK"
-            reason = ai_reason if not geo_blocked else f"Geo-blocked: {country}"
-        elif ai_verdict == "WARN":
-            final_action = "WARN"
-            reason = ai_reason
-        elif rep_score >= self.threshold_block:
-            final_action = "BLOCK"
-            reason = f"High threat score: {rep_score}%"
-        elif rep_score >= self.threshold_warn:
-            final_action = "WARN"
-            reason = f"Moderate threat score: {rep_score}%"
-        elif is_tor:
-            final_action = "WARN"
-            reason = "TOR exit node"
-        else:
-            reason = "Clean"
+        if action == "BLOCK":
+            self._block_ip(ip)
 
         ev = IDSEvent(
             timestamp=time.time(),
@@ -414,18 +392,13 @@ class IDSEngine:
             score=rep_score,
             country=country,
             isp=isp,
-            action=final_action,
+            action=action,
             reason=reason,
             total_reports=total_reports,
             is_tor=is_tor,
-            ai_score=ai_combined,
         )
-
-        if final_action == "BLOCK":
-            self._block_ip(ip)
-
         self._record(ev)
-        return final_action
+        return action
 
     def _block_ip(self, ip: str):
         if ip in self._blocked_ips:
@@ -472,6 +445,11 @@ class IDSEngine:
         if self.ai:
             return self.ai.get_ip_details(ip)
         return {"error": "AI engine not available"}
+
+    def get_ai_alerts(self, limit=50) -> list:
+        if self.ai:
+            return self.ai.get_alerts(limit)
+        return []
 
 
 def load_api_key() -> str:

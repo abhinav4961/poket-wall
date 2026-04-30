@@ -1,6 +1,7 @@
 """
-Behavioral AI IDS — lightweight anomaly detection for Pi Zero 2W.
+Behavioral AI IDS — batch log analyzer for Pi Zero 2W.
 Pure Python, zero runtime dependencies. Pre-trained model.
+Runs periodic analysis on collected logs, not per-connection.
 """
 
 import json
@@ -8,7 +9,7 @@ import math
 import os
 import time
 from collections import defaultdict, deque
-from threading import Lock
+from threading import Lock, Thread
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "ai_model.json")
@@ -27,171 +28,130 @@ NUM_FEATURES = len(FEATURE_NAMES)
 
 
 class FeatureExtractor:
-    """Tracks rolling behavioral features per IP."""
-
-    WINDOW_SEC = 60
+    """Accumulates per-IP stats for batch analysis."""
 
     def __init__(self):
         self._lock = Lock()
-        self._connections: dict[str, deque] = defaultdict(lambda: deque())
-        self._port_sets: dict[str, set] = defaultdict(set)
-        self._host_sets: dict[str, set] = defaultdict(set)
-        self._request_lengths: dict[str, deque] = defaultdict(lambda: deque())
-        self._errors: dict[str, int] = defaultdict(int)
-        self._total_requests: dict[str, int] = defaultdict(int)
-        self._special_chars: dict[str, int] = defaultdict(int)
-        self._burst_times: dict[str, deque] = defaultdict(lambda: deque())
-        self._protocol_anomalies: dict[str, int] = defaultdict(int)
-        self._last_scores: dict[str, dict] = {}
+        self._connections = defaultdict(list)
+        self._port_sets = defaultdict(set)
+        self._host_sets = defaultdict(set)
+        self._request_lengths = defaultdict(list)
+        self._errors = defaultdict(int)
+        self._total_requests = defaultdict(int)
+        self._special_chars = defaultdict(int)
+        self._burst_times = defaultdict(list)
+        self._protocol_anomalies = defaultdict(int)
 
-    def record_connection(self, ip: str, dest_port: int, dest_host: str = "", request_len: int = 0):
-        now = time.time()
+    def record_connection(self, ip, dest_port=0, dest_host="", request_len=0):
         with self._lock:
-            self._connections[ip].append(now)
-            self._port_sets[ip].add(dest_port)
+            self._connections[ip].append(time.time())
+            if dest_port:
+                self._port_sets[ip].add(dest_port)
             if dest_host:
                 self._host_sets[ip].add(dest_host)
             if request_len > 0:
                 self._request_lengths[ip].append(request_len)
 
-    def record_error(self, ip: str):
+    def record_error(self, ip):
         with self._lock:
             self._errors[ip] += 1
 
-    def record_request(self, ip: str, raw_request: str = ""):
+    def record_request(self, ip, raw_request=""):
         SPECIAL_CHARS = set("../'\"<>%;()|&`\\x00")
         char_count = sum(1 for c in raw_request if c in SPECIAL_CHARS)
         with self._lock:
             self._total_requests[ip] += 1
             self._special_chars[ip] += char_count
+            self._burst_times[ip].append(time.time())
 
-            now = time.time()
-            bt = self._burst_times[ip]
-            bt.append(now)
-            while bt and bt[0] < now - 1:
-                bt.popleft()
-
-    def record_protocol_anomaly(self, ip: str):
+    def record_protocol_anomaly(self, ip):
         with self._lock:
             self._protocol_anomalies[ip] += 1
 
-    def get_features(self, ip: str) -> dict[str, float]:
-        print(f"[FEAT-DEBUG] get_features for {ip}")
+    def get_features(self, ip, window_sec=60):
         now = time.time()
-        window_start = now - self.WINDOW_SEC
-
+        window_start = now - window_sec
         with self._lock:
-            print(f"[FEAT-DEBUG] acquired lock for {ip}")
-            conns = self._connections[ip]
-            while conns and conns[0] < window_start:
-                conns.popleft()
+            conns = [t for t in self._connections[ip] if t >= window_start]
+            bursts = [t for t in self._burst_times[ip] if t >= window_start]
+            req_lens = [l for l in self._request_lengths[ip] if l > 0]
 
-            bt = self._burst_times[ip]
-            while bt and bt[0] < window_start:
-                bt.popleft()
-
-            rl = self._request_lengths[ip]
-
-            conn_count = len(conns)
-            conn_rate = conn_count / max(self.WINDOW_SEC, 1)
-            unique_ports = len(self._port_sets[ip])
-            unique_hosts = len(self._host_sets[ip])
-            avg_req_len = sum(rl) / len(rl) if rl else 0
             total_req = max(self._total_requests[ip], 1)
-            error_rate = self._errors[ip] / total_req
-            total_chars_in_requests = sum(
-                len(r) for r in ["" for _ in range(total_req)]
-            )
-            special_char_ratio = self._special_chars[ip] / total_req
-            burst_count = len(bt)
-            proto_anom = self._protocol_anomalies[ip]
+            return {
+                "conn_rate": len(conns) / max(window_sec, 1),
+                "unique_ports": len(self._port_sets[ip]),
+                "unique_hosts": len(self._host_sets[ip]),
+                "avg_request_len": sum(req_lens) / len(req_lens) if req_lens else 0,
+                "error_rate": self._errors[ip] / total_req,
+                "special_char_ratio": self._special_chars[ip] / total_req,
+                "burst_count": len(bursts),
+                "protocol_anomalies": self._protocol_anomalies[ip],
+            }
 
-            if conn_count < 2:
-                self._port_sets[ip] = set()
-                self._host_sets[ip] = set()
-                while self._request_lengths[ip] and self._request_lengths[ip][0] < window_start:
-                    self._request_lengths[ip].popleft()
-                self._errors[ip] = 0
-                self._total_requests[ip] = 0
-                self._special_chars[ip] = 0
-
-        return {
-            "conn_rate": conn_rate,
-            "unique_ports": unique_ports,
-            "unique_hosts": unique_hosts,
-            "avg_request_len": avg_req_len,
-            "error_rate": error_rate,
-            "special_char_ratio": special_char_ratio,
-            "burst_count": burst_count,
-            "protocol_anomalies": proto_anom,
-        }
-
-    def get_feature_vector(self, ip: str) -> list[float]:
+    def get_feature_vector(self, ip):
         feats = self.get_features(ip)
         return [feats[name] for name in FEATURE_NAMES]
 
-    def update_score(self, ip: str, score: float):
+    def get_all_ips(self):
         with self._lock:
-            self._last_scores[ip] = {
-                "score": score,
-                "timestamp": time.time(),
-                "features": self.get_features(ip),
-            }
+            return set(self._connections.keys())
 
-    def get_score(self, ip: str) -> float:
+    def reset_window(self, window_sec=60):
+        """Purge old data outside the analysis window."""
+        now = time.time()
+        cutoff = now - window_sec * 2
         with self._lock:
-            entry = self._last_scores.get(ip)
-            if entry and time.time() - entry["timestamp"] < self.WINDOW_SEC * 2:
-                return entry["score"]
-            return 0.0
+            for ip in list(self._connections.keys()):
+                self._connections[ip] = [t for t in self._connections[ip] if t >= cutoff]
+                self._burst_times[ip] = [t for t in self._burst_times[ip] if t >= cutoff]
+                self._request_lengths[ip] = [l for l in self._request_lengths[ip] if l > 0][-1000:]
+                if not self._connections[ip]:
+                    del self._connections[ip]
+                    del self._port_sets[ip]
+                    del self._host_sets[ip]
+                    del self._request_lengths[ip]
+                    del self._errors[ip]
+                    del self._total_requests[ip]
+                    del self._special_chars[ip]
+                    del self._burst_times[ip]
+                    del self._protocol_anomalies[ip]
 
 
 class IsolationForest:
     """Pure Python Isolation Forest — no numpy/sklearn at runtime."""
 
     def __init__(self):
-        self.trees: list[dict] = []
-        self.sample_size: int = 256
-        self.contamination: float = 0.05
+        self.trees = []
+        self.sample_size = 256
+        self.contamination = 0.05
 
-    def _path_length(self, x: list[float], tree: dict, depth: int = 0) -> float:
+    def _path_length(self, x, tree, depth=0):
         if tree["type"] == "leaf":
             return depth + self._c(len(tree["indices"]))
-
-        feature_idx = tree["feature"]
-        split_val = tree["split"]
-
-        if x[feature_idx] < split_val:
+        if x[tree["feature"]] < tree["split"]:
             return self._path_length(x, tree["left"], depth + 1)
-        else:
-            return self._path_length(x, tree["right"], depth + 1)
+        return self._path_length(x, tree["right"], depth + 1)
 
-    def _c(self, n: int) -> float:
+    def _c(self, n):
         if n <= 1:
             return 0
         if n == 2:
             return 1
         return 2.0 * (math.log(n - 1) + 0.5772156649) - 2.0 * (n - 1) / n
 
-    def score(self, x: list[float]) -> float:
-        """Returns anomaly score 0..1. Higher = more anomalous."""
+    def score(self, x):
         if not self.trees:
             return 0.0
-
         avg_path = sum(self._path_length(x, t) for t in self.trees) / len(self.trees)
         c_n = self._c(self.sample_size)
         if c_n == 0:
             return 0.5
+        return min(1.0, max(0.0, 2 ** (-avg_path / c_n)))
 
-        score = 2 ** (-avg_path / c_n)
-        return min(1.0, max(0.0, score))
-
-    def load(self, path: str = MODEL_PATH):
-        """Load pre-trained model from JSON."""
+    def load(self, path=MODEL_PATH):
         if not os.path.exists(path):
-            print(f"[AI] Model file not found at {path} — using baseline only")
+            print(f"[AI] Model file not found at {path}")
             return False
-
         try:
             with open(path) as f:
                 data = json.load(f)
@@ -206,30 +166,29 @@ class IsolationForest:
 
 
 class RollingBaseline:
-    """Adaptive baseline that learns normal traffic over 24h."""
+    """Adaptive baseline that learns normal traffic over time."""
 
     def __init__(self):
-        self._scores: deque = deque(maxlen=10000)
+        self._scores = []
         self._start_time = time.time()
         self._warmup_sec = 3600
         self._mean = 0.3
         self._std = 0.15
         self._lock = Lock()
 
-    def add_score(self, score: float):
+    def add_scores(self, scores):
         with self._lock:
-            self._scores.append(score)
+            self._scores.extend(scores)
             if len(self._scores) > 100 and time.time() - self._start_time > self._warmup_sec:
-                scores = list(self._scores)
-                n = len(scores)
-                self._mean = sum(scores) / n
-                variance = sum((s - self._mean) ** 2 for s in scores) / n
+                n = len(self._scores)
+                self._mean = sum(self._scores) / n
+                variance = sum((s - self._mean) ** 2 for s in self._scores) / n
                 self._std = math.sqrt(variance) if variance > 0 else 0.01
 
-    def get_threshold(self) -> float:
+    def get_threshold(self):
         return self._mean + 2.5 * max(self._std, 0.05)
 
-    def get_stats(self) -> dict:
+    def get_stats(self):
         with self._lock:
             return {
                 "mean": round(self._mean, 3),
@@ -244,100 +203,128 @@ class DecisionEngine:
     """Combines all IDS signals into a final verdict."""
 
     def __init__(self):
-        self.ai_weight = 0.4
-        self.reputation_weight = 0.3
-        self.geo_weight = 0.2
-        self.behavior_weight = 0.1
-
         self.threshold_block = 0.7
         self.threshold_warn = 0.5
 
-    def combine(
-        self,
-        ai_score: float,
-        reputation_score: float,
-        geo_blocked: bool,
-        behavior_anomaly: float,
-    ) -> tuple[str, str, float]:
-        """Returns (verdict, reason, combined_score)."""
+    def combine(self, ai_score, geo_blocked=False):
         if geo_blocked:
-            return ("BLOCK", "Geo-blocked country", 1.0)
-
-        combined = (
-            ai_score * self.ai_weight
-            + reputation_score * self.reputation_weight
-            + behavior_anomaly * self.behavior_weight
-        )
+            return "BLOCK", "Geo-blocked country", 1.0
 
         if ai_score > 0.85:
-            combined = max(combined, 0.75)
+            ai_score = max(ai_score, 0.75)
 
-        if combined >= self.threshold_block:
-            return ("BLOCK", f"AI anomaly score: {ai_score:.2f}, combined: {combined:.2f}", combined)
-        elif combined >= self.threshold_warn:
-            return ("WARN", f"Suspicious behavior: {combined:.2f}", combined)
-
-        return ("ALLOW", "Clean", combined)
+        if ai_score >= self.threshold_block:
+            return "BLOCK", f"AI anomaly score: {ai_score:.2f}", ai_score
+        elif ai_score >= self.threshold_warn:
+            return "WARN", f"Suspicious behavior: {ai_score:.2f}", ai_score
+        return "ALLOW", "Clean", ai_score
 
 
 class AIEngine:
-    """Main AI IDS engine — orchestrates feature extraction, model, and decisions."""
+    """Batch AI IDS — analyzes traffic periodically, not per-connection."""
 
-    def __init__(self):
+    def __init__(self, analysis_interval=60):
         self.extractor = FeatureExtractor()
         self.model = IsolationForest()
         self.baseline = RollingBaseline()
         self.decision = DecisionEngine()
         self._lock = Lock()
 
+        self._alerts = deque(maxlen=200)
+        self._ip_scores = {}
+        self._running = False
+        self._interval = analysis_interval
+        self._stats = {"total_analyses": 0, "total_alerts": 0}
+
         model_loaded = self.model.load()
         if model_loaded:
-            print("[AI] Behavioral IDS ready")
+            print("[AI] Batch analyzer ready")
         else:
-            print("[AI] Using adaptive baseline only (no pre-trained model)")
+            print("[AI] Using adaptive baseline only")
 
-    def record(self, ip: str, dest_port: int = 0, dest_host: str = "", request: str = "", request_len: int = 0):
+    def start_background(self):
+        """Start periodic batch analysis thread."""
+        self._running = True
+        t = Thread(target=self._analysis_loop, daemon=True)
+        t.start()
+        print(f"[AI] Batch analysis every {self._interval}s")
+
+    def stop(self):
+        self._running = False
+
+    def record(self, ip, dest_port=0, dest_host="", request="", request_len=0):
         self.extractor.record_connection(ip, dest_port, dest_host, request_len)
         if request:
             self.extractor.record_request(ip, request)
 
-    def record_error(self, ip: str):
+    def record_error(self, ip):
         self.extractor.record_error(ip)
 
-    def record_anomaly(self, ip: str):
+    def record_anomaly(self, ip):
         self.extractor.record_protocol_anomaly(ip)
 
-    def check_ip(self, ip: str, reputation_score: float = 0.0, geo_blocked: bool = False) -> tuple[str, str, float]:
-        print(f"[AI-DEBUG] check_ip called for {ip}")
-        features = self.extractor.get_feature_vector(ip)
-        print(f"[AI-DEBUG] got features for {ip}")
-        ai_score = self.model.score(features)
-        print(f"[AI-DEBUG] score={ai_score} for {ip}")
-        self.baseline.add_score(ai_score)
-        self.extractor.update_score(ip, ai_score)
+    def _analysis_loop(self):
+        """Periodically analyze all tracked IPs."""
+        while self._running:
+            time.sleep(self._interval)
+            self._run_analysis()
 
-        behavior_anomaly = ai_score
-        if not self.model.trees:
-            behavior_anomaly = ai_score if ai_score > self.baseline.get_threshold() else 0.0
+    def _run_analysis(self):
+        """Score all active IPs and generate alerts."""
+        try:
+            all_ips = self.extractor.get_all_ips()
+            if not all_ips:
+                return
 
-        verdict, reason, combined = self.decision.combine(
-            ai_score, reputation_score, geo_blocked, behavior_anomaly
-        )
-        print(f"[AI-DEBUG] verdict={verdict} for {ip}")
+            scores = []
+            for ip in all_ips:
+                features = self.extractor.get_feature_vector(ip)
+                ai_score = self.model.score(features)
+                scores.append(ai_score)
+                self._ip_scores[ip] = ai_score
 
-        return verdict, reason, combined
+                verdict, reason, combined = self.decision.combine(ai_score)
+                if verdict in ("BLOCK", "WARN"):
+                    alert = {
+                        "timestamp": time.time(),
+                        "ip": ip,
+                        "score": ai_score,
+                        "verdict": verdict,
+                        "reason": reason,
+                        "features": self.extractor.get_features(ip),
+                    }
+                    self._alerts.append(alert)
+                    self._stats["total_alerts"] += 1
+                    log_msg = f"[AI-ALERT] {ip} {verdict} (score: {ai_score:.2f}) — {reason}"
+                    print(log_msg)
 
-    def get_ai_stats(self) -> dict:
+            self.baseline.add_scores(scores)
+            self.extractor.reset_window()
+            self._stats["total_analyses"] += 1
+
+        except Exception as e:
+            print(f"[AI] Analysis error: {e}")
+
+    def get_ai_stats(self):
         return {
             "baseline": self.baseline.get_stats(),
             "model_loaded": bool(self.model.trees),
             "tree_count": len(self.model.trees),
+            "interval_sec": self._interval,
+            "analyses_run": self._stats["total_analyses"],
+            "total_alerts": self._stats["total_alerts"],
         }
 
-    def get_ip_details(self, ip: str) -> dict:
+    def get_alerts(self, limit=50):
+        with self._lock:
+            return list(self._alerts)[-limit:]
+
+    def get_ip_score(self, ip):
+        return self._ip_scores.get(ip, 0.0)
+
+    def get_ip_details(self, ip):
         features = self.extractor.get_features(ip)
-        score = self.extractor.get_score(ip)
         return {
-            "ai_score": round(score, 3),
+            "ai_score": round(self._ip_scores.get(ip, 0.0), 3),
             "features": {k: round(v, 2) for k, v in features.items()},
         }
