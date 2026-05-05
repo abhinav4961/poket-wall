@@ -257,7 +257,7 @@ class IDSEngine:
 
         if AI_AVAILABLE:
             try:
-                self.ai = AIEngine(analysis_interval=60)
+                self.ai = AIEngine(analysis_interval=30, block_callback=self._block_ip)
                 self.ai.start_background()
             except Exception as e:
                 log.error(f"[IDS] AI engine failed to initialise: {e}")

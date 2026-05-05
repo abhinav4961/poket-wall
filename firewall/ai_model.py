@@ -178,7 +178,7 @@ class RollingBaseline:
     def __init__(self):
         self._scores = []
         self._start_time = time.time()
-        self._warmup_sec = 3600
+        self._warmup_sec = 300
         self._mean = 0.3
         self._std = 0.15
         self._lock = Lock()
@@ -193,7 +193,7 @@ class RollingBaseline:
                 self._std = math.sqrt(variance) if variance > 0 else 0.01
 
     def get_threshold(self):
-        return self._mean + 2.5 * max(self._std, 0.05)
+        return self._mean + 2.0 * max(self._std, 0.05)
 
     def get_stats(self):
         with self._lock:
@@ -210,8 +210,8 @@ class DecisionEngine:
     """Combines all IDS signals into a final verdict with suggestions."""
 
     def __init__(self):
-        self.threshold_block = 0.7
-        self.threshold_warn = 0.5
+        self.threshold_block = 0.55
+        self.threshold_warn = 0.40
 
     def combine(self, ai_score, geo_blocked=False):
         if geo_blocked:
@@ -228,29 +228,30 @@ class DecisionEngine:
     def _generate_suggestions(self, score):
         suggestions = []
         if score > 0.85:
-            suggestions.append("Consider permanent IP block — extremely high anomaly score")
+            suggestions.append("Critical threat — permanent block recommended")
         if score > 0.7:
-            suggestions.append("Monitor closely — repeated warnings should trigger auto-block")
+            suggestions.append("High risk — consider permanent block")
         if score > 0.5:
-            suggestions.append("Review traffic patterns — may indicate reconnaissance activity")
+            suggestions.append("Monitor closely — repeated warnings should trigger auto-block")
         return suggestions
 
 
 class AIEngine:
     """Batch AI IDS — analyzes traffic periodically, not per-connection."""
 
-    def __init__(self, analysis_interval=60):
+    def __init__(self, analysis_interval=30, block_callback=None):
         self.extractor = FeatureExtractor()
         self.model = IsolationForest()
         self.baseline = RollingBaseline()
         self.decision = DecisionEngine()
         self._lock = Lock()
+        self._block_callback = block_callback
 
         self._alerts = deque(maxlen=200)
         self._ip_scores = {}
         self._running = False
         self._interval = analysis_interval
-        self._stats = {"total_analyses": 0, "total_alerts": 0}
+        self._stats = {"total_analyses": 0, "total_alerts": 0, "total_blocked": 0}
 
         model_loaded = self.model.load()
         if model_loaded:
@@ -262,7 +263,7 @@ class AIEngine:
         self._running = True
         t = Thread(target=self._analysis_loop, daemon=True)
         t.start()
-        print(f"[AI] Batch analysis every {self._interval}s")
+        print(f"[AI] Batch analysis every {self._interval}s — auto-block enabled")
 
     def stop(self):
         self._running = False
@@ -299,7 +300,7 @@ class AIEngine:
                     self._ip_scores[ip] = ai_score
 
                 verdict, reason, combined, suggestions = self.decision.combine(ai_score)
-                if verdict in ("BLOCK", "WARN"):
+                if verdict == "BLOCK":
                     alert = {
                         "timestamp": time.time(),
                         "ip": ip,
@@ -312,8 +313,28 @@ class AIEngine:
                     with self._lock:
                         self._alerts.append(alert)
                     self._stats["total_alerts"] += 1
-                    log_msg = f"[AI-ALERT] {ip} {verdict} (score: {ai_score:.2f}) — {reason}"
-                    print(log_msg)
+
+                    # AUTO-BLOCK: Call back to IDS engine to block this IP
+                    if self._block_callback:
+                        self._block_callback(ip)
+                        self._stats["total_blocked"] += 1
+
+                    print(f"[AI-BLOCK] {ip} score={ai_score:.2f} {reason}")
+
+                elif verdict == "WARN":
+                    alert = {
+                        "timestamp": time.time(),
+                        "ip": ip,
+                        "score": ai_score,
+                        "verdict": verdict,
+                        "reason": reason,
+                        "features": self.extractor.get_features(ip),
+                        "suggestions": suggestions,
+                    }
+                    with self._lock:
+                        self._alerts.append(alert)
+                    self._stats["total_alerts"] += 1
+                    print(f"[AI-WARN] {ip} score={ai_score:.2f} {reason}")
 
             self.baseline.add_scores(scores)
             self.extractor.reset_window()
@@ -330,13 +351,14 @@ class AIEngine:
             "interval_sec": self._interval,
             "analyses_run": self._stats["total_analyses"],
             "total_alerts": self._stats["total_alerts"],
+            "total_blocked": self._stats["total_blocked"],
         }
 
     def get_alerts(self, limit=50):
         with self._lock:
             return list(self._alerts)[-limit:]
 
-    def get_suspicious_ips(self, threshold=0.5):
+    def get_suspicious_ips(self, threshold=0.4):
         with self._lock:
             return {ip: score for ip, score in self._ip_scores.items() if score >= threshold}
 
