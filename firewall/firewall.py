@@ -6,11 +6,11 @@ import urllib.request
 from collections import defaultdict
 from threading import Lock
 
-# Resolve paths relative to script directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 RULES_PATH = os.path.join(BASE_DIR, "rules.json")
+if not os.path.exists(RULES_PATH):
+    RULES_PATH = os.path.join(os.path.dirname(BASE_DIR), "rules.json")
 
-# ------------------ LOGGING ------------------
 os.makedirs("logs", exist_ok=True)
 
 logging.basicConfig(
@@ -25,7 +25,6 @@ logging.basicConfig(
 
 log = logging.getLogger("piwall")
 
-# ------------------ BLOCKLIST ------------------
 BLOCKLIST_SOURCES = {
     "stevenblack": "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
     "urlhaus": "https://urlhaus.abuse.ch/downloads/hostfile/",
@@ -58,6 +57,7 @@ def _fetch_and_cache(name, url):
     except Exception as e:
         log.warning(f"[blocklist] failed {name}: {e}")
         if os.path.exists(cache_file):
+            log.info(f"[blocklist] using stale cache for {name}")
             with open(cache_file) as f:
                 return f.read()
         return ""
@@ -101,16 +101,34 @@ def build_blacklist():
 
 BLACKLIST = build_blacklist()
 
-# ------------------ FLOOD PROTECTION ------------------
 _request_times = defaultdict(list)
 _banned_ips = {}
 _lock = Lock()
 
 FLOOD_THRESHOLD = 20
 FLOOD_BAN_DURATION = 60
+FLOOD_CLEANUP_INTERVAL = 300
+_last_flood_cleanup = 0
+
+
+def _cleanup_flood_data():
+    global _last_flood_cleanup
+    now = time.time()
+    if now - _last_flood_cleanup < FLOOD_CLEANUP_INTERVAL:
+        return
+    _last_flood_cleanup = now
+    cutoff = now - 2
+    with _lock:
+        expired = [ip for ip, exp in _banned_ips.items() if exp < now]
+        for ip in expired:
+            del _banned_ips[ip]
+        stale = [ip for ip, times in _request_times.items() if not times or all(t < cutoff for t in times)]
+        for ip in stale:
+            del _request_times[ip]
 
 
 def check_flood(ip):
+    _cleanup_flood_data()
     now = time.time()
 
     with _lock:
@@ -121,9 +139,8 @@ def check_flood(ip):
                 del _banned_ips[ip]
 
         times = _request_times[ip]
-        times = [t for t in times if now - t < 1]
+        times[:] = [t for t in times if now - t < 1]
         times.append(now)
-        _request_times[ip] = times
 
         if len(times) > FLOOD_THRESHOLD:
             _banned_ips[ip] = now + FLOOD_BAN_DURATION
@@ -133,9 +150,8 @@ def check_flood(ip):
     return False
 
 
-# ------------------ DOMAIN CHECK ------------------
 def is_blocked(host):
-    host = host.split(":")[0].lower()
+    host = host.lower()
     parts = host.split(".")
 
     for i in range(len(parts)):

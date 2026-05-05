@@ -3,10 +3,10 @@ import curses
 import socket
 import sys
 import threading
-import time
 from firewall import is_blocked, check_flood, log
 from ids import IDSEngine, load_api_key, test_api_key
 from tui import TUI
+from ai_tui import AITUI
 
 HOST = "0.0.0.0"
 PORT = 3128
@@ -16,12 +16,6 @@ conn_lock = threading.Lock()
 MAX_CONN = 10
 
 ids_engine: IDSEngine | None = None
-tui_ref: TUI | None = None
-
-
-def start_api(engine):
-    from api import start_api_server
-    start_api_server(engine)
 
 
 def _recv_full_request(sock):
@@ -41,7 +35,6 @@ def _recv_full_request(sock):
 
 
 def _ids_check_async(ip, request=""):
-    """Run IDS analysis in background — never blocks the proxy."""
     if not ids_engine:
         return
     try:
@@ -49,8 +42,6 @@ def _ids_check_async(ip, request=""):
         verdict = ids_engine.check_ip(ip)
         if verdict == "BLOCK":
             log.warning(f"[IDS] {ip} BLOCKED (background analysis)")
-            if ip in ids_engine._blocked_ips:
-                pass  # already blocked, next connection will be rejected
     except Exception as e:
         log.error(f"[IDS] background check error: {e}")
 
@@ -60,7 +51,6 @@ def handle_client(client_sock, client_addr):
     try:
         client_sock.settimeout(5)
 
-        # Flood check — fast, no locks
         if check_flood(ip):
             try:
                 client_sock.send(b"HTTP/1.1 429 Too Many Requests\r\n\r\n")
@@ -92,7 +82,6 @@ def handle_client(client_sock, client_addr):
 
         method, url = first_line[0], first_line[1]
 
-        # Parse host
         if method == "CONNECT":
             host = url
         else:
@@ -103,39 +92,54 @@ def handle_client(client_sock, client_addr):
 
         host_no_port = host.split(":")[0]
 
-        # Blocklist check — fast dict lookup
         if is_blocked(host_no_port):
             log.info(f"[{ip}] {host_no_port} BLOCKED")
-            client_sock.send(b"HTTP/1.1 403 Forbidden\r\n\r\n")
+            try:
+                client_sock.send(b"HTTP/1.1 403 Forbidden\r\n\r\n")
+            except Exception:
+                pass
             return
 
         log.info(f"[{ip}] {host_no_port} ALLOWED")
 
-        # Spawn IDS analysis in background — never blocks forwarding
         threading.Thread(target=_ids_check_async, args=(ip, request), daemon=True).start()
 
-        # Forward traffic
         if method == "CONNECT":
-            dest_host, dest_port = (host.split(":") + ["443"])[:2]
+            parts = host.split(":")
+            dest_host = parts[0]
             try:
-                dest_port = int(dest_port)
+                dest_port = int(parts[1]) if len(parts) > 1 else 443
             except ValueError:
                 dest_port = 443
             log.info(f"[{ip}] CONNECT {dest_host}:{dest_port}")
             server = socket.create_connection((dest_host, dest_port), timeout=15)
             client_sock.settimeout(None)
-            client_sock.send(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            try:
+                client_sock.send(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            except Exception:
+                server.close()
+                return
             _pipe_bidirectional(client_sock, server)
         else:
             dest_host = host_no_port
             dest_port = int(host.split(":")[1]) if ":" in host else 80
             log.info(f"[{ip}] HTTP {dest_host}:{dest_port}")
             server = socket.create_connection((dest_host, dest_port), timeout=10)
-            server.sendall(request.encode())
+            try:
+                server.sendall(request.encode())
+            except Exception:
+                server.close()
+                return
             _proxy_http_response(client_sock, server, ip)
 
     except socket.timeout:
         log.warning(f"[{ip}] connection timed out")
+    except socket.gaierror as e:
+        log.error(f"[{ip}] DNS resolution failed: {e}")
+        try:
+            client_sock.send(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+        except Exception:
+            pass
     except ConnectionRefusedError as e:
         log.error(f"[{ip}] connection refused: {e}")
         try:
@@ -206,11 +210,12 @@ def start_proxy():
 
 
 def main():
-    global ids_engine, tui_ref
+    global ids_engine
 
     parser = argparse.ArgumentParser(description="Pocket-Wall Firewall + IDS")
     parser.add_argument("--tui", action="store_true", help="Launch with TUI dashboard")
-    parser.add_argument("--web", action="store_true", help="Launch with React web dashboard (API on :5000)")
+    parser.add_argument("--ai", action="store_true", help="Launch with AI analysis dashboard")
+    parser.add_argument("--web", action="store_true", help="Launch with REST API on port 5000")
     parser.add_argument("--no-ids", action="store_true", help="Disable IDS engine")
     parser.add_argument("--test-ids", metavar="IP", nargs="?", const="1.1.1.1", help="Test AbuseIPDB API against a public IP and exit")
     args = parser.parse_args()
@@ -231,12 +236,13 @@ def main():
             log.warning("[IDS] No API key found in .env — IDS disabled")
 
     if args.web:
+        from api import start_api_server
         proxy_thread = threading.Thread(target=start_proxy, daemon=True)
         proxy_thread.start()
         log.info("[WEB] Starting REST API on port 5000")
-        start_api(ids_engine)
+        start_api_server(ids_engine)
 
-    elif args.tui:
+    elif args.tui or args.ai:
         if ids_engine is None:
             print("ERROR: IDS engine required for TUI. Check your .env file for abuse_ipdb_api_key")
             sys.exit(1)
@@ -244,10 +250,13 @@ def main():
         proxy_thread = threading.Thread(target=start_proxy, daemon=True)
         proxy_thread.start()
 
-        tui = TUI(ids_engine)
-        tui_ref = tui
         try:
-            curses.wrapper(tui.run)
+            if args.ai:
+                ai_tui = AITUI(ids_engine)
+                curses.wrapper(ai_tui.run)
+            else:
+                tui = TUI(ids_engine)
+                curses.wrapper(tui.run)
         except KeyboardInterrupt:
             pass
         finally:

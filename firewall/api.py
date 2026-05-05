@@ -1,5 +1,5 @@
 """
-Pocket-Wall — REST API for the React dashboard.
+Pocket-Wall — REST API for the dashboard.
 Built with Python stdlib only (http.server) — zero dependencies.
 Runs alongside the proxy on port 5000.
 """
@@ -9,16 +9,15 @@ import os
 import time
 import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from threading import Thread
 
 from firewall import BLACKLIST, is_blocked, build_blacklist, log
-from firewall import _request_times, _banned_ips, FLOOD_THRESHOLD, FLOOD_BAN_DURATION
+from firewall import _request_times, _banned_ips, _lock as flood_lock, FLOOD_THRESHOLD, FLOOD_BAN_DURATION
 
-# These get set by main.py before the server starts
 ids_engine = None
 
 RULES_FILE = os.path.join(os.path.dirname(__file__), "rules.json")
 LOG_FILE = os.path.join(os.path.dirname(__file__), "logs", "piwall.log")
+MAX_LOG_LINES = 500
 
 
 def _event_to_dict(ev):
@@ -38,10 +37,8 @@ def _event_to_dict(ev):
 
 
 class APIHandler(BaseHTTPRequestHandler):
-    """Handle REST API requests with CORS support."""
 
     def log_message(self, fmt, *args):
-        """Suppress default stderr logging."""
         pass
 
     def _send_json(self, data, status=200):
@@ -65,14 +62,6 @@ class APIHandler(BaseHTTPRequestHandler):
         except Exception:
             return {}
 
-    def _parse_query(self):
-        parsed = urllib.parse.urlparse(self.path)
-        return dict(urllib.parse.parse_qsl(parsed.query))
-
-    def _route_path(self):
-        return urllib.parse.urlparse(self.path).path
-
-    # ─── CORS preflight ───
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -80,53 +69,47 @@ class APIHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
-    # ─── GET routes ───
     def do_GET(self):
-        path = self._route_path()
-        query = self._parse_query()
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        query = dict(urllib.parse.parse_qsl(parsed.query))
 
-        if path == "/api/stats":
-            self._handle_stats()
-        elif path == "/api/events":
-            self._handle_events(query)
-        elif path == "/api/alerts":
-            self._handle_alerts()
-        elif path == "/api/rules":
-            self._handle_get_rules()
-        elif path == "/api/geo":
-            self._handle_get_geo()
-        elif path == "/api/blocked-ips":
-            self._handle_blocked_ips()
-        elif path == "/api/logs":
-            self._handle_logs(query)
-        elif path == "/api/flood-status":
-            self._handle_flood_status()
-        elif path == "/api/ai-stats":
-            self._handle_ai_stats()
-        elif path == "/api/ai-ip":
-            self._handle_ai_ip(query)
+        routes = {
+            "/api/stats": self._handle_stats,
+            "/api/events": lambda: self._handle_events(query),
+            "/api/alerts": self._handle_alerts,
+            "/api/rules": self._handle_get_rules,
+            "/api/geo": self._handle_get_geo,
+            "/api/blocked-ips": self._handle_blocked_ips,
+            "/api/logs": lambda: self._handle_logs(query),
+            "/api/flood-status": self._handle_flood_status,
+            "/api/ai-stats": self._handle_ai_stats,
+            "/api/ai-ip": lambda: self._handle_ai_ip(query),
+        }
+
+        handler = routes.get(path)
+        if handler:
+            handler()
         else:
             self._send_json({"error": "Not found"}, 404)
 
-    # ─── POST routes ───
     def do_POST(self):
-        path = self._route_path()
+        path = urllib.parse.urlparse(self.path).path
         body = self._read_body()
 
-        if path == "/api/rules":
-            self._handle_post_rules(body)
-        elif path == "/api/geo/country":
-            self._handle_post_country(body)
-        elif path == "/api/geo/thresholds":
-            self._handle_post_thresholds(body)
-        elif path == "/api/unblock":
-            self._handle_unblock(body)
-        elif path == "/api/check-domain":
-            self._handle_check_domain(body)
+        routes = {
+            "/api/rules": lambda: self._handle_post_rules(body),
+            "/api/geo/country": lambda: self._handle_post_country(body),
+            "/api/geo/thresholds": lambda: self._handle_post_thresholds(body),
+            "/api/unblock": lambda: self._handle_unblock(body),
+            "/api/check-domain": lambda: self._handle_check_domain(body),
+        }
+
+        handler = routes.get(path)
+        if handler:
+            handler()
         else:
             self._send_json({"error": "Not found"}, 404)
-
-    # ─────────────────── HANDLERS ───────────────────
 
     def _handle_stats(self):
         if ids_engine is None:
@@ -163,13 +146,13 @@ class APIHandler(BaseHTTPRequestHandler):
 
     def _handle_post_rules(self, body):
         blacklist = body.get("blacklist", [])
+        new_bl = build_blacklist()
         try:
             with open(RULES_FILE, "w") as f:
                 json.dump({"blacklist": blacklist}, f, indent=2)
         except Exception as e:
             return self._send_json({"error": str(e)}, 500)
 
-        new_bl = build_blacklist()
         BLACKLIST.clear()
         BLACKLIST.update(new_bl)
         self._send_json({"ok": True, "count": len(blacklist)})
@@ -236,7 +219,7 @@ class APIHandler(BaseHTTPRequestHandler):
         self._send_json({"domain": domain, "blocked": blocked})
 
     def _handle_logs(self, query):
-        lines = int(query.get("lines", 50))
+        lines = min(int(query.get("lines", 50)), MAX_LOG_LINES)
         try:
             with open(LOG_FILE) as f:
                 all_lines = f.readlines()
@@ -246,7 +229,8 @@ class APIHandler(BaseHTTPRequestHandler):
 
     def _handle_flood_status(self):
         now = time.time()
-        banned = {ip: exp for ip, exp in _banned_ips.items() if exp > now}
+        with flood_lock:
+            banned = {ip: exp for ip, exp in _banned_ips.items() if exp > now}
         self._send_json({
             "threshold": FLOOD_THRESHOLD,
             "ban_duration": FLOOD_BAN_DURATION,
@@ -267,10 +251,7 @@ class APIHandler(BaseHTTPRequestHandler):
         self._send_json(ids_engine.get_ip_ai_details(ip))
 
 
-# ─────────────────── SERVER ───────────────────
-
 def start_api_server(engine=None, host="0.0.0.0", port=5000):
-    """Start the API HTTP server (blocking)."""
     global ids_engine
     ids_engine = engine
 

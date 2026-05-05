@@ -5,6 +5,7 @@ AI runs as a background log analyzer, not per-connection.
 
 import ipaddress
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -19,7 +20,6 @@ try:
     from ai_model import AIEngine
     AI_AVAILABLE = True
 except ImportError as e:
-    print(f"[IDS] AI module not available: {e}")
     AI_AVAILABLE = False
     AIEngine = None
 
@@ -28,6 +28,8 @@ GEO_RULES_PATH = os.path.join(BASE_DIR, "geo_rules.json")
 ENV_PATH = os.path.join(BASE_DIR, ".env")
 BLOCKED_IPS_FILE = os.path.join(BASE_DIR, "blocked_ips.json")
 CACHE_TTL = 86400
+
+log = logging.getLogger("piwall")
 
 
 @dataclass
@@ -100,12 +102,12 @@ class AbuseIPDBChecker:
         except urllib.error.HTTPError as e:
             error_body = e.read().decode()
             if e.code == 429:
-                print(f"[IDS] AbuseIPDB rate limited")
+                log.warning("[IDS] AbuseIPDB rate limited")
             else:
-                print(f"[IDS] AbuseIPDB HTTP {e.code}: {error_body}")
+                log.error(f"[IDS] AbuseIPDB HTTP {e.code}: {error_body}")
             return None
         except Exception as e:
-            print(f"[IDS] AbuseIPDB error: {e}")
+            log.error(f"[IDS] AbuseIPDB error: {e}")
             return None
 
 
@@ -115,7 +117,10 @@ class IPBlocker:
 
     def __init__(self):
         self._method = None
+        self._nft_initialized = False
         self._detect_method()
+        if self._method == "nftables":
+            self._nft_ensure_set()
 
     def _detect_method(self):
         if shutil.which("nft") and self._test_nftables():
@@ -124,7 +129,7 @@ class IPBlocker:
             self._method = "iptables"
         else:
             self._method = "memory"
-            print("[IDS] No root access — using in-memory blocking only")
+            log.warning("[IDS] No root access — using in-memory blocking only")
 
     def _test_nftables(self) -> bool:
         try:
@@ -179,6 +184,8 @@ class IPBlocker:
         return True
 
     def _nft_ensure_set(self):
+        if self._nft_initialized:
+            return
         subprocess.run(
             ["nft", "add", "table", "inet", self.TABLE_NAME],
             capture_output=True, timeout=5
@@ -188,6 +195,7 @@ class IPBlocker:
              "{ type ipv4_addr; flags timeout; timeout 24h; }"],
             capture_output=True, timeout=5
         )
+        self._nft_initialized = True
 
     def _nft_block(self, ip: str) -> bool:
         try:
@@ -252,7 +260,7 @@ class IDSEngine:
                 self.ai = AIEngine(analysis_interval=60)
                 self.ai.start_background()
             except Exception as e:
-                print(f"[IDS] AI engine failed to initialise: {e}")
+                log.error(f"[IDS] AI engine failed to initialise: {e}")
                 self.ai = None
         else:
             self.ai = None
@@ -281,7 +289,7 @@ class IDSEngine:
         except FileNotFoundError:
             pass
         except Exception as e:
-            print(f"[IDS] config load error: {e}")
+            log.error(f"[IDS] config load error: {e}")
 
     def save_config(self):
         try:
@@ -305,9 +313,9 @@ class IDSEngine:
             for entry in data.get("blocks", []):
                 if now - entry["timestamp"] < entry.get("ttl", CACHE_TTL):
                     self._blocked_ips.add(entry["ip"])
-            print(f"[IDS] Loaded {len(self._blocked_ips)} persistent blocks")
+            log.info(f"[IDS] Loaded {len(self._blocked_ips)} persistent blocks")
         except Exception as e:
-            print(f"[IDS] Failed to load persistent blocks: {e}")
+            log.error(f"[IDS] Failed to load persistent blocks: {e}")
 
     def _save_persistent_blocks(self):
         try:
@@ -321,7 +329,7 @@ class IDSEngine:
             with open(BLOCKED_IPS_FILE, "w") as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
-            print(f"[IDS] Failed to save persistent blocks: {e}")
+            log.error(f"[IDS] Failed to save persistent blocks: {e}")
 
     def record_traffic(self, ip: str, dest_port: int = 0, dest_host: str = "",
                        request: str = "", request_len: int = 0):
@@ -337,29 +345,31 @@ class IDSEngine:
             self.ai.record_anomaly(ip)
 
     def add_country(self, code: str):
-        self.blocked_countries.add(code.upper())
+        with self._lock:
+            self.blocked_countries.add(code.upper())
         self.save_config()
 
     def remove_country(self, code: str):
-        self.blocked_countries.discard(code.upper())
+        with self._lock:
+            self.blocked_countries.discard(code.upper())
         self.save_config()
 
     def check_ip(self, ip: str) -> str:
-        """Fast check: only persistent blocks + cached AbuseIPDB. AI runs in background."""
-        if ip in self._blocked_ips:
-            return "BLOCK"
+        with self._lock:
+            if ip in self._blocked_ips:
+                return "BLOCK"
 
         result = self.checker.check(ip)
 
-        country = "LAN"
-        isp = "Local"
+        country = "???"
+        isp = "Unknown"
         total_reports = 0
         is_tor = False
         rep_score = 0
 
         if result is None:
             action = "ALLOW"
-            reason = "Private/local IP"
+            reason = "Private/local IP or API unavailable"
         else:
             rep_score = result["confidence_score"]
             country = result["country_code"]
@@ -367,7 +377,10 @@ class IDSEngine:
             total_reports = result["total_reports"]
             is_tor = result["is_tor"]
 
-            if country in self.blocked_countries:
+            with self._lock:
+                blocked = country in self.blocked_countries
+
+            if blocked:
                 action = "BLOCK"
                 reason = f"Geo-blocked: {country}"
             elif rep_score >= self.threshold_block:
@@ -401,15 +414,17 @@ class IDSEngine:
         return action
 
     def _block_ip(self, ip: str):
-        if ip in self._blocked_ips:
-            return
-        self._blocked_ips.add(ip)
+        with self._lock:
+            if ip in self._blocked_ips:
+                return
+            self._blocked_ips.add(ip)
         self._save_persistent_blocks()
         success = self.blocker.block(ip)
+        method = self.blocker.get_method()
         if success:
-            print(f"[IDS] Blocked {ip} via {self.blocker.get_method()}")
+            log.info(f"[IDS] Blocked {ip} via {method}")
         else:
-            print(f"[IDS] System-level block failed for {ip} — in-memory only")
+            log.warning(f"[IDS] System-level block failed for {ip} — in-memory only")
 
     def _record(self, ev: IDSEvent):
         with self._lock:
@@ -425,12 +440,14 @@ class IDSEngine:
                 self.stats.allowed += 1
 
     def unblock_ip(self, ip: str):
-        self._blocked_ips.discard(ip)
+        with self._lock:
+            self._blocked_ips.discard(ip)
         self._save_persistent_blocks()
         self.blocker.unblock(ip)
 
     def get_blocked_ips(self) -> list[str]:
-        return sorted(self._blocked_ips)
+        with self._lock:
+            return sorted(self._blocked_ips)
 
     def clear_alerts(self):
         with self._lock:
@@ -463,9 +480,9 @@ def load_api_key() -> str:
                 if key.strip() == "abuse_ipdb_api_key":
                     return val.strip()
     except FileNotFoundError:
-        print(f"[IDS] .env file not found at {ENV_PATH}")
+        log.warning(f"[IDS] .env file not found at {ENV_PATH}")
     except Exception as e:
-        print(f"[IDS] Error reading .env: {e}")
+        log.error(f"[IDS] Error reading .env: {e}")
     return ""
 
 
