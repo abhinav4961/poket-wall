@@ -4,8 +4,6 @@ Integrates Firewall + AI dashboards with seamless switching.
 """
 
 import curses
-import math
-import os
 import time
 from threading import Lock
 from ai_tui import AITUI
@@ -59,15 +57,6 @@ def _draw_box(win, y, x, h, w, title="", color=4):
         pass
 
 
-def _progress_bar(value, max_val, width):
-    if max_val == 0:
-        filled = 0
-    else:
-        filled = int((value / max_val) * width)
-    filled = min(filled, width)
-    return "\u2588" * filled + "\u2591" * (width - filled)
-
-
 class TUI:
     """Curses-based IDS dashboard with integrated AI view."""
 
@@ -80,10 +69,9 @@ class TUI:
         self._thresh_input = ""
         self._thresh_field = 0
         self._scroll_traffic = 0
-        self._scroll_alerts = 0
         self._lock = Lock()
-        self._last_stats = {"total": 0, "blocked": 0, "warned": 0, "allowed": 0}
         self._ai_tui = AITUI(ids_engine) if ids_engine.ai else None
+        self._ai_tui._embedded = True
 
     def run(self, stdscr):
         curses.curs_set(0)
@@ -102,7 +90,6 @@ class TUI:
         curses.init_pair(8, curses.COLOR_BLACK, curses.COLOR_GREEN)
         curses.init_pair(9, curses.COLOR_WHITE, curses.COLOR_MAGENTA)
         curses.init_pair(10, curses.COLOR_RED, -1)
-        curses.init_pair(11, curses.COLOR_YELLOW, curses.COLOR_BLACK)
 
         while self._running:
             try:
@@ -120,7 +107,7 @@ class TUI:
                 if self._view == "firewall":
                     self._draw_firewall(stdscr, h, w)
                 elif self._view == "ai":
-                    self._draw_ai_view(stdscr, h, w)
+                    self._ai_tui.draw(stdscr, h, w)
 
                 stdscr.refresh()
 
@@ -136,12 +123,54 @@ class TUI:
         if key == -1:
             return
 
-        if self._view == "firewall":
+        if self._view == "ai":
             if key == ord('q'):
                 self._running = False
-            elif key == ord('a'):
-                self._view = "ai"
-            elif key == ord('g'):
+            elif key == 27 or key == ord('f'):
+                self._view = "firewall"
+                self._ai_tui._mode = "overview"
+            else:
+                self._ai_tui.handle_key(key)
+            return
+
+        # Firewall view
+        if key == ord('q'):
+            self._running = False
+        elif key == ord('a') and self._ai_tui:
+            self._view = "ai"
+            return
+
+        if self._mode == "geo":
+            if key == 27:
+                self._mode = "main"
+            elif key in (curses.KEY_ENTER, 10, 13):
+                self._process_geo_input()
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                self._geo_input = self._geo_input[:-1]
+            elif 32 <= key <= 126:
+                self._geo_input += chr(key)
+        elif self._mode == "thresholds":
+            if key == 27:
+                self._mode = "main"
+            elif key == ord('\t'):
+                self._thresh_field = 1 - self._thresh_field
+                self._thresh_input = ""
+            elif key in (curses.KEY_ENTER, 10, 13):
+                self._process_thresh_input()
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                self._thresh_input = self._thresh_input[:-1]
+            elif 48 <= key <= 57:
+                self._thresh_input += chr(key)
+        elif self._mode == "blocked":
+            if key == 27 or key == ord('b'):
+                self._mode = "main"
+            elif key == ord('u'):
+                ips = self.ids.get_blocked_ips()
+                if ips:
+                    self.ids.unblock_ip(ips[-1])
+        else:
+            # Main mode
+            if key == ord('g'):
                 self._mode = "geo"
                 self._geo_input = ""
             elif key == ord('t'):
@@ -156,45 +185,6 @@ class TUI:
                 self._scroll_traffic = max(0, self._scroll_traffic - 1)
             elif key == curses.KEY_DOWN:
                 self._scroll_traffic += 1
-
-            elif self._mode == "geo":
-                if key == 27:
-                    self._mode = "main"
-                elif key in (curses.KEY_ENTER, 10, 13):
-                    self._process_geo_input()
-                elif key in (curses.KEY_BACKSPACE, 127, 8):
-                    self._geo_input = self._geo_input[:-1]
-                elif 32 <= key <= 126:
-                    self._geo_input += chr(key)
-
-            elif self._mode == "thresholds":
-                if key == 27:
-                    self._mode = "main"
-                elif key == ord('\t'):
-                    self._thresh_field = 1 - self._thresh_field
-                    self._thresh_input = ""
-                elif key in (curses.KEY_ENTER, 10, 13):
-                    self._process_thresh_input()
-                elif key in (curses.KEY_BACKSPACE, 127, 8):
-                    self._thresh_input = self._thresh_input[:-1]
-                elif 48 <= key <= 57:
-                    self._thresh_input += chr(key)
-
-            elif self._mode == "blocked":
-                if key == 27 or key == ord('b'):
-                    self._mode = "main"
-                elif key == ord('u'):
-                    ips = self.ids.get_blocked_ips()
-                    if ips:
-                        self.ids.unblock_ip(ips[-1])
-
-        elif self._view == "ai":
-            if key == ord('q'):
-                self._running = False
-            elif key == 27 or key == ord('f'):
-                self._view = "firewall"
-            elif self._ai_tui:
-                self._ai_tui.handle_key(key)
 
     def _process_geo_input(self):
         raw = self._geo_input.strip().upper()
@@ -226,32 +216,25 @@ class TUI:
     def _draw_firewall(self, stdscr, h, w):
         now = time.strftime("%H:%M:%S")
         title = f" {SYM_SHIELD}  POCKET-WALL FIREWALL  |  {now}  "
-        header_line = title.center(w)
-        _safe_addstr(stdscr, 0, 0, header_line[:w], curses.color_pair(7) | curses.A_BOLD)
+        _safe_addstr(stdscr, 0, 0, title.center(w), curses.color_pair(7) | curses.A_BOLD)
         _safe_addstr(stdscr, 1, 0, SYM_LINE * w, curses.color_pair(4))
 
         stats = self.ids.stats
-        self._last_stats = {"total": stats.total, "blocked": stats.blocked, "warned": stats.warned, "allowed": stats.allowed}
-
-        bar_w = w - 4
-        bar_y = 3
-        _safe_addstr(stdscr, bar_y, 2, f" Total: {stats.total}  Blocked: {stats.blocked}  Warned: {stats.warned}  Allowed: {stats.allowed} ", curses.color_pair(4) | curses.A_BOLD)
-
-        if stats.total > 0:
-            bar_y += 1
-            blocked_pct = stats.blocked / stats.total
-            warned_pct = stats.warned / stats.total
-            allowed_pct = stats.allowed / stats.total
-
-            blocked_w = int(blocked_pct * bar_w)
-            warned_w = int(warned_pct * bar_w)
-            allowed_w = bar_w - blocked_w - warned_w
-
-            _safe_addstr(stdscr, bar_y, 2, SYM_BLOCK * max(blocked_w, 0), curses.color_pair(1))
-            _safe_addstr(stdscr, bar_y, 2 + blocked_w, SYM_WARN * max(warned_w, 0), curses.color_pair(2))
-            _safe_addstr(stdscr, bar_y, 2 + blocked_w + warned_w, SYM_OK * max(allowed_w, 0), curses.color_pair(3))
 
         if self._mode == "main":
+            bar_w = w - 4
+            bar_y = 3
+            _safe_addstr(stdscr, bar_y, 2, f" Total: {stats.total}  Blocked: {stats.blocked}  Warned: {stats.warned}  Allowed: {stats.allowed} ", curses.color_pair(4) | curses.A_BOLD)
+
+            if stats.total > 0:
+                bar_y += 1
+                blocked_w = int((stats.blocked / stats.total) * bar_w)
+                warned_w = int((stats.warned / stats.total) * bar_w)
+                allowed_w = bar_w - blocked_w - warned_w
+                _safe_addstr(stdscr, bar_y, 2, SYM_BLOCK * max(blocked_w, 0), curses.color_pair(1))
+                _safe_addstr(stdscr, bar_y, 2 + blocked_w, SYM_WARN * max(warned_w, 0), curses.color_pair(2))
+                _safe_addstr(stdscr, bar_y, 2 + blocked_w + warned_w, SYM_OK * max(allowed_w, 0), curses.color_pair(3))
+
             split = w // 2
             panel_top = 6
             panel_h = h - 11
@@ -284,13 +267,6 @@ class TUI:
             self._draw_thresholds(stdscr, h, w)
         elif self._mode == "blocked":
             self._draw_blocked(stdscr, h, w)
-
-    def _draw_ai_view(self, stdscr, h, w):
-        if self._ai_tui:
-            self._ai_tui.draw(stdscr, h, w)
-        else:
-            _safe_addstr(stdscr, h // 2, 2, "AI engine not available.", curses.color_pair(1) | curses.A_BOLD)
-            _safe_addstr(stdscr, h // 2 + 1, 2, "[ESC/f] Back to Firewall", curses.color_pair(4))
 
     def _draw_traffic(self, win, start_y, start_x, width, height):
         events = list(self.ids.events)
@@ -335,7 +311,6 @@ class TUI:
         for ev in alerts:
             if row >= height:
                 break
-            y = start_y + row
             ts = time.strftime("%H:%M:%S", time.localtime(ev.timestamp))
 
             if ev.action == "BLOCK":
@@ -346,7 +321,7 @@ class TUI:
                 color = curses.color_pair(2)
 
             line = f"{sym} {ts} {ev.ip:<16} S:{ev.score}% {ev.country}"
-            _safe_addstr(win, y, start_x, line[:width], color)
+            _safe_addstr(win, start_y + row, start_x, line[:width], color)
             row += 1
 
             if row < height:
@@ -410,6 +385,3 @@ class TUI:
 
         _safe_addstr(stdscr, h - 3, 2, "[u] Unblock last IP", curses.color_pair(4))
         _safe_addstr(stdscr, h - 2, 2, "[ESC/b] Back to main", curses.color_pair(4))
-
-    def stop(self):
-        self._running = False

@@ -1,11 +1,8 @@
 """
 AI Dashboard TUI for Pocket-Wall — dedicated AI analysis monitor.
-Shows alerts, suspicious IPs, behavioral analysis, and actionable suggestions.
 Can be used standalone via run() or embedded in main TUI via draw()/handle_key().
 """
 
-import curses
-import math
 import time
 
 SYM_SHIELD = "\u26e8"
@@ -103,10 +100,7 @@ def _detect_attack_type(features):
 
 
 class AITUI:
-    """AI Dashboard — alerts, suspicious IPs, suggestions.
-    
-    Can be used standalone (run()) or embedded in main TUI (draw() + handle_key()).
-    """
+    """AI Dashboard — alerts, suspicious IPs, suggestions."""
 
     def __init__(self, ids_engine):
         self.ids = ids_engine
@@ -120,6 +114,7 @@ class AITUI:
         self._embedded = False
 
     def run(self, stdscr):
+        import curses
         curses.curs_set(0)
         stdscr.nodelay(True)
         stdscr.timeout(500)
@@ -135,9 +130,6 @@ class AITUI:
         curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_CYAN)
         curses.init_pair(8, curses.COLOR_BLACK, curses.COLOR_GREEN)
         curses.init_pair(9, curses.COLOR_WHITE, curses.COLOR_MAGENTA)
-        curses.init_pair(10, curses.COLOR_RED, curses.COLOR_BLACK)
-        curses.init_pair(11, curses.COLOR_YELLOW, curses.COLOR_BLACK)
-        curses.init_pair(12, curses.COLOR_GREEN, curses.COLOR_BLACK)
 
         self._embedded = False
         while self._running:
@@ -165,6 +157,7 @@ class AITUI:
                 self._running = False
 
     def handle_key(self, key):
+        import curses
         if key == -1:
             return
 
@@ -228,6 +221,7 @@ class AITUI:
             self._draw_ip_detail(stdscr, h, w)
 
     def _draw_overview(self, stdscr, h, w):
+        import curses
         now = time.strftime("%H:%M:%S")
         title = f" {SYM_AI}  POCKET-WALL AI DASHBOARD  |  {now}  "
         _safe_addstr(stdscr, 0, 0, title.center(w), curses.color_pair(9) | curses.A_BOLD)
@@ -235,7 +229,6 @@ class AITUI:
 
         if not self.ai:
             _safe_addstr(stdscr, 3, 2, "AI engine not available.", curses.color_pair(1) | curses.A_BOLD)
-            _safe_addstr(stdscr, 4, 2, "[ESC/f] Back to Firewall", curses.color_pair(4))
             return
 
         stats = self.ai.get_ai_stats()
@@ -245,7 +238,6 @@ class AITUI:
         _safe_addstr(stdscr, row, 2, f"Model: {'Loaded' if stats.get('model_loaded') else 'Not loaded'} | Trees: {stats.get('tree_count', 0)} | Interval: {stats.get('interval_sec', 0)}s | Analyses: {stats.get('analyses_run', 0)}", curses.color_pair(4) | curses.A_BOLD)
         row += 1
 
-        bar_w = w - 6
         threshold = baseline.get("threshold", 0.5)
         mean = baseline.get("mean", 0)
         std = baseline.get("std", 0)
@@ -266,12 +258,11 @@ class AITUI:
         self._draw_ai_alerts(stdscr, row + 1, 2, split - 3, left_h - 2)
         self._draw_threat_meter(stdscr, row + 1, split + 1, w - split - 3, left_h - 2)
 
-        bottom_y = h - 3
-        _safe_addstr(stdscr, bottom_y, 0, SYM_LINE * w, curses.color_pair(4))
         keys = "[ESC/f]Firewall [s]Suspicious IPs [j]Suggestions [Up/Down]Scroll"
         _safe_addstr(stdscr, h - 1, 2, keys, curses.color_pair(8) | curses.A_BOLD)
 
     def _draw_ai_alerts(self, win, start_y, start_x, width, height):
+        import curses
         if not self.ai:
             return
         alerts = self.ai.get_alerts(100)
@@ -286,16 +277,16 @@ class AITUI:
 
         visible = alerts[self._scroll_alerts:self._scroll_alerts + height]
         for i, alert in enumerate(visible):
-            y = start_y + i
             ts = time.strftime("%H:%M:%S", time.localtime(alert.get("timestamp", 0)))
             score = alert.get("score", 0)
             risk, color = _risk_label(score)
             ip = alert.get("ip", "?")
 
             line = f"{ts} {ip:<16} [{risk:>8}] {score:.2f}"
-            _safe_addstr(win, y, start_x, line[:width], curses.color_pair(color) | curses.A_BOLD)
+            _safe_addstr(win, start_y + i, start_x, line[:width], curses.color_pair(color) | curses.A_BOLD)
 
     def _draw_threat_meter(self, win, start_y, start_x, width, height):
+        import curses
         if not self.ai:
             return
 
@@ -327,10 +318,10 @@ class AITUI:
         row += 1
         if row < start_y + height - 2:
             if critical > 0:
-                _safe_addstr(win, row, start_x + 2, "ACTION: Immediate investigation required!", curses.color_pair(1) | curses.A_BOLD | curses.A_BLINK)
+                _safe_addstr(win, row, start_x + 2, "ACTION: Immediate investigation required!", curses.color_pair(1) | curses.A_BOLD)
                 row += 1
             if high > 0:
-                _safe_addstr(win, row, start_x + 2, "WARN: High-risk IPs detected, consider blocking", curses.color_pair(1))
+                _safe_addstr(win, row, start_x + 2, "WARN: High-risk IPs detected", curses.color_pair(1))
                 row += 1
             if medium > 0:
                 _safe_addstr(win, row, start_x + 2, "MONITOR: Suspicious patterns detected", curses.color_pair(2))
@@ -339,6 +330,7 @@ class AITUI:
                 _safe_addstr(win, row, start_x + 2, "All clear — no suspicious activity", curses.color_pair(3))
 
     def _draw_suspicious(self, stdscr, h, w):
+        import curses
         now = time.strftime("%H:%M:%S")
         title = f" {SYM_LIGHT}  SUSPICIOUS IP ANALYSIS  |  {now}  "
         _safe_addstr(stdscr, 0, 0, title.center(w), curses.color_pair(9) | curses.A_BOLD)
@@ -350,7 +342,7 @@ class AITUI:
 
         suspicious = self.ai.get_suspicious_ips()
         if not suspicious:
-            _safe_addstr(stdscr, 3, 2, "No suspicious IPs detected. Network traffic appears normal.", curses.color_pair(3) | curses.A_BOLD)
+            _safe_addstr(stdscr, 3, 2, "No suspicious IPs detected.", curses.color_pair(3) | curses.A_BOLD)
             _safe_addstr(stdscr, h - 1, 2, "[ESC/f] Back", curses.color_pair(8) | curses.A_BOLD)
             return
 
@@ -378,12 +370,13 @@ class AITUI:
             _safe_addstr(stdscr, y, 64, f"~ {attack_type}", curses.color_pair(2))
 
             if y + 1 < h - 2:
-                feature_summary = f"     conn_rate={features.get('conn_rate', 0):.2f} ports={features.get('unique_ports', 0)} errors={features.get('error_rate', 0):.2f} burst={features.get('burst_count', 0)}"
+                feature_summary = f"     conn_rate={features.get('conn_rate', 0):.2f} ports={features.get('unique_ports', 0)} errors={features.get('error_rate', 0):.2f}"
                 _safe_addstr(stdscr, y + 1, 2, feature_summary[:w-3], curses.color_pair(4))
 
-        _safe_addstr(stdscr, h - 2, 2, "Press ENTER for details | [u] unblock selected | [ESC/f] Back", curses.color_pair(8) | curses.A_BOLD)
+        _safe_addstr(stdscr, h - 2, 2, "Press ENTER for details | [ESC/f] Back", curses.color_pair(8) | curses.A_BOLD)
 
     def _draw_suggestions(self, stdscr, h, w):
+        import curses
         now = time.strftime("%H:%M:%S")
         title = f" {SYM_AI}  AI SECURITY SUGGESTIONS  |  {now}  "
         _safe_addstr(stdscr, 0, 0, title.center(w), curses.color_pair(9) | curses.A_BOLD)
@@ -407,34 +400,28 @@ class AITUI:
 
             critical_ips = [(ip, s) for ip, s in suspicious.items() if s >= 0.85]
             if critical_ips:
-                suggestions.append((1, "CRITICAL", f"Immediately block {len(critical_ips)} critical-risk IP(s): {', '.join(ip for ip, _ in critical_ips[:3])}", curses.color_pair(1) | curses.A_BOLD))
+                suggestions.append((1, "CRITICAL", f"Block {len(critical_ips)} critical-risk IP(s): {', '.join(ip for ip, _ in critical_ips[:3])}", curses.color_pair(1) | curses.A_BOLD))
 
             high_ips = [(ip, s) for ip, s in suspicious.items() if 0.7 <= s < 0.85]
             if high_ips:
-                suggestions.append((2, "HIGH", f"Consider blocking {len(high_ips)} high-risk IP(s) showing attack patterns", curses.color_pair(1)))
+                suggestions.append((2, "HIGH", f"Consider blocking {len(high_ips)} high-risk IP(s)", curses.color_pair(1)))
 
             medium_ips = [(ip, s) for ip, s in suspicious.items() if 0.5 <= s < 0.7]
             if medium_ips:
-                suggestions.append((3, "MEDIUM", f"Monitor {len(medium_ips)} medium-risk IP(s) — add to watchlist", curses.color_pair(2)))
+                suggestions.append((3, "MEDIUM", f"Monitor {len(medium_ips)} medium-risk IP(s)", curses.color_pair(2)))
 
             stats = self.ai.get_ai_stats()
-            baseline = stats.get("baseline", {})
-            if baseline.get("threshold", 1.0) < 0.4:
-                suggestions.append((4, "TUNING", "AI threshold is low — consider raising it to reduce false positives", curses.color_pair(2)))
-            elif baseline.get("threshold", 0) > 0.8:
-                suggestions.append((4, "TUNING", "AI threshold is high — you may miss subtle attacks", curses.color_pair(2)))
-
             if stats.get("total_alerts", 0) > 50:
-                suggestions.append((5, "POLICY", f"High alert count ({stats['total_alerts']}) — review and tighten blocklist rules", curses.color_pair(2)))
+                suggestions.append((4, "POLICY", "High alert count — tighten blocklist rules", curses.color_pair(2)))
 
             if self.ids.blocker.get_method() == "memory":
-                suggestions.append((6, "SYSTEM", "Running without root — enable iptables/nftables for real IP blocking", curses.color_pair(2)))
+                suggestions.append((5, "SYSTEM", "Run as root to enable iptables/nftables blocking", curses.color_pair(2)))
 
             if not self.ids.blocked_countries:
-                suggestions.append((7, "GEO", "No geo-blocking configured — consider blocking known hostile regions", curses.color_pair(2)))
+                suggestions.append((6, "GEO", "No geo-blocking configured", curses.color_pair(2)))
 
-            suggestions.append((8, "BEST PRACTICE", "Regularly update blocklists and review blocked IPs", curses.color_pair(3)))
-            suggestions.append((9, "BEST PRACTICE", "Monitor AI baseline drift over time for accuracy", curses.color_pair(3)))
+            suggestions.append((7, "BEST PRACTICE", "Regularly update blocklists", curses.color_pair(3)))
+            suggestions.append((8, "BEST PRACTICE", "Monitor AI baseline drift over time", curses.color_pair(3)))
 
             for priority, level, text, color in suggestions:
                 if row >= h - 3:
@@ -445,6 +432,7 @@ class AITUI:
         _safe_addstr(stdscr, h - 2, 2, "[ESC/f] Back", curses.color_pair(8) | curses.A_BOLD)
 
     def _draw_ip_detail(self, stdscr, h, w):
+        import curses
         if not self._selected_ip or not self.ai:
             self._mode = "suspicious"
             return
@@ -472,12 +460,9 @@ class AITUI:
         feature_labels = {
             "conn_rate": "Connection Rate",
             "unique_ports": "Unique Ports",
-            "unique_hosts": "Unique Hosts",
-            "avg_request_len": "Avg Request Len",
             "error_rate": "Error Rate",
-            "special_char_ratio": "Special Chars",
             "burst_count": "Burst Count",
-            "protocol_anomalies": "Protocol Anomalies",
+            "special_char_ratio": "Special Chars",
         }
         for fname, label in feature_labels.items():
             if row >= h - 5:
@@ -496,10 +481,7 @@ class AITUI:
             for s in suggestions:
                 if row >= h - 3:
                     break
-                _safe_addstr(stdscr, row, 4, f"• {s[:w-7]}", curses.color_pair(2))
+                _safe_addstr(stdscr, row, 4, f"* {s[:w-7]}", curses.color_pair(2))
                 row += 1
 
         _safe_addstr(stdscr, h - 2, 2, "[u] Unblock IP | [ESC/s] Back to Suspicious", curses.color_pair(8) | curses.A_BOLD)
-
-    def stop(self):
-        self._running = False
