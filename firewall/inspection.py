@@ -4,7 +4,7 @@ Pure Python, zero dependencies. Works on HTTP request data.
 """
 
 import re
-from dataclases import dataclass
+from dataclasses import dataclass
 from threading import Lock
 
 # ── SQL Injection patterns ─────────────────────────────────────────
