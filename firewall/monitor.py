@@ -146,7 +146,9 @@ class Monitor:
             r += 1
             _safe(scr, r, mid + 2, f"Threshold: {bl.get('threshold', 0):.3f}", curses.color_pair(5))
             r += 1
-            _safe(scr, r, mid + 2, f"Total Alerts: {ai_stats.get('total_alerts', 0)}", curses.color_pair(1))
+            _safe(scr, r, mid + 2, f"Alerts: {ai_stats.get('total_alerts', 0)}  Auto-blocked: {ai_stats.get('total_blocked', 0)}", curses.color_pair(1))
+            r += 1
+            _safe(scr, r, mid + 2, f"Interval: {ai_stats.get('interval_sec', 0)}s  Analyses: {ai_stats.get('analyses_run', 0)}", curses.color_pair(4))
         else:
             _safe(scr, r, mid + 2, "API Connection Error", curses.color_pair(1))
             r += 2
