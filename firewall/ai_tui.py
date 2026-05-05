@@ -1,6 +1,7 @@
 """
 AI Dashboard TUI for Pocket-Wall — dedicated AI analysis monitor.
 Shows alerts, suspicious IPs, behavioral analysis, and actionable suggestions.
+Can be used standalone via run() or embedded in main TUI via draw()/handle_key().
 """
 
 import curses
@@ -102,17 +103,21 @@ def _detect_attack_type(features):
 
 
 class AITUI:
-    """AI Dashboard — alerts, suspicious IPs, suggestions."""
+    """AI Dashboard — alerts, suspicious IPs, suggestions.
+    
+    Can be used standalone (run()) or embedded in main TUI (draw() + handle_key()).
+    """
 
     def __init__(self, ids_engine):
         self.ids = ids_engine
-        self.ai = ids_engine.ai
+        self.ai = ids_engine.ai if ids_engine else None
         self._running = True
         self._mode = "overview"
         self._scroll_alerts = 0
         self._scroll_suspicious = 0
         self._selected_ip = None
         self._detail_scroll = 0
+        self._embedded = False
 
     def run(self, stdscr):
         curses.curs_set(0)
@@ -134,6 +139,7 @@ class AITUI:
         curses.init_pair(11, curses.COLOR_YELLOW, curses.COLOR_BLACK)
         curses.init_pair(12, curses.COLOR_GREEN, curses.COLOR_BLACK)
 
+        self._embedded = False
         while self._running:
             try:
                 stdscr.erase()
@@ -147,27 +153,23 @@ class AITUI:
                         self._running = False
                     continue
 
-                if self._mode == "overview":
-                    self._draw_overview(stdscr, h, w)
-                elif self._mode == "suspicious":
-                    self._draw_suspicious(stdscr, h, w)
-                elif self._mode == "suggestions":
-                    self._draw_suggestions(stdscr, h, w)
-                elif self._mode == "ip_detail":
-                    self._draw_ip_detail(stdscr, h, w)
-
+                self.draw(stdscr, h, w)
                 stdscr.refresh()
 
                 key = stdscr.getch()
-                self._handle_key(key)
+                self.handle_key(key)
 
             except curses.error:
                 pass
             except KeyboardInterrupt:
                 self._running = False
 
-    def _handle_key(self, key):
+    def handle_key(self, key):
         if key == -1:
+            return
+
+        if self._embedded and (key == 27 or key == ord('f')):
+            self._mode = "overview"
             return
 
         if self._mode == "overview":
@@ -204,7 +206,7 @@ class AITUI:
                 self._mode = "overview"
 
         elif self._mode == "ip_detail":
-            if key == 27 or key == ord('s') or key == ord('q'):
+            if key == 27 or key == ord('s'):
                 self._mode = "suspicious"
                 self._selected_ip = None
             elif key == curses.KEY_UP:
@@ -215,6 +217,16 @@ class AITUI:
                 if self._selected_ip:
                     self.ids.unblock_ip(self._selected_ip)
 
+    def draw(self, stdscr, h, w):
+        if self._mode == "overview":
+            self._draw_overview(stdscr, h, w)
+        elif self._mode == "suspicious":
+            self._draw_suspicious(stdscr, h, w)
+        elif self._mode == "suggestions":
+            self._draw_suggestions(stdscr, h, w)
+        elif self._mode == "ip_detail":
+            self._draw_ip_detail(stdscr, h, w)
+
     def _draw_overview(self, stdscr, h, w):
         now = time.strftime("%H:%M:%S")
         title = f" {SYM_AI}  POCKET-WALL AI DASHBOARD  |  {now}  "
@@ -223,7 +235,7 @@ class AITUI:
 
         if not self.ai:
             _safe_addstr(stdscr, 3, 2, "AI engine not available.", curses.color_pair(1) | curses.A_BOLD)
-            _safe_addstr(stdscr, 4, 2, "[ESC/q] Exit", curses.color_pair(4))
+            _safe_addstr(stdscr, 4, 2, "[ESC/f] Back to Firewall", curses.color_pair(4))
             return
 
         stats = self.ai.get_ai_stats()
@@ -256,7 +268,7 @@ class AITUI:
 
         bottom_y = h - 3
         _safe_addstr(stdscr, bottom_y, 0, SYM_LINE * w, curses.color_pair(4))
-        keys = "[q]Quit [s]Suspicious IPs [j]Suggestions [Up/Down]Scroll"
+        keys = "[ESC/f]Firewall [s]Suspicious IPs [j]Suggestions [Up/Down]Scroll"
         _safe_addstr(stdscr, h - 1, 2, keys, curses.color_pair(8) | curses.A_BOLD)
 
     def _draw_ai_alerts(self, win, start_y, start_x, width, height):
@@ -339,7 +351,7 @@ class AITUI:
         suspicious = self.ai.get_suspicious_ips()
         if not suspicious:
             _safe_addstr(stdscr, 3, 2, "No suspicious IPs detected. Network traffic appears normal.", curses.color_pair(3) | curses.A_BOLD)
-            _safe_addstr(stdscr, h - 1, 2, "[ESC/s] Back", curses.color_pair(8) | curses.A_BOLD)
+            _safe_addstr(stdscr, h - 1, 2, "[ESC/f] Back", curses.color_pair(8) | curses.A_BOLD)
             return
 
         sorted_ips = sorted(suspicious.items(), key=lambda x: x[1], reverse=True)
@@ -369,7 +381,7 @@ class AITUI:
                 feature_summary = f"     conn_rate={features.get('conn_rate', 0):.2f} ports={features.get('unique_ports', 0)} errors={features.get('error_rate', 0):.2f} burst={features.get('burst_count', 0)}"
                 _safe_addstr(stdscr, y + 1, 2, feature_summary[:w-3], curses.color_pair(4))
 
-        _safe_addstr(stdscr, h - 2, 2, "Press ENTER for details | [u] unblock selected (future) | [ESC/s] Back", curses.color_pair(8) | curses.A_BOLD)
+        _safe_addstr(stdscr, h - 2, 2, "Press ENTER for details | [u] unblock selected | [ESC/f] Back", curses.color_pair(8) | curses.A_BOLD)
 
     def _draw_suggestions(self, stdscr, h, w):
         now = time.strftime("%H:%M:%S")
@@ -430,7 +442,7 @@ class AITUI:
                 _safe_addstr(stdscr, row, 2, f"[P{priority}] {level}: {text[:w-16]}", color)
                 row += 1
 
-        _safe_addstr(stdscr, h - 2, 2, "[ESC/j] Back", curses.color_pair(8) | curses.A_BOLD)
+        _safe_addstr(stdscr, h - 2, 2, "[ESC/f] Back", curses.color_pair(8) | curses.A_BOLD)
 
     def _draw_ip_detail(self, stdscr, h, w):
         if not self._selected_ip or not self.ai:

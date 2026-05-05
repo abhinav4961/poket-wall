@@ -6,7 +6,6 @@ import threading
 from firewall import is_blocked, check_flood, log
 from ids import IDSEngine, load_api_key, test_api_key
 from tui import TUI
-from ai_tui import AITUI
 
 HOST = "0.0.0.0"
 PORT = 3128
@@ -213,8 +212,7 @@ def main():
     global ids_engine
 
     parser = argparse.ArgumentParser(description="Pocket-Wall Firewall + IDS")
-    parser.add_argument("--tui", action="store_true", help="Launch with TUI dashboard")
-    parser.add_argument("--ai", action="store_true", help="Launch with AI analysis dashboard")
+    parser.add_argument("--tui", action="store_true", help="Launch with TUI dashboard (press [a] for AI view)")
     parser.add_argument("--web", action="store_true", help="Launch with REST API on port 5000")
     parser.add_argument("--no-ids", action="store_true", help="Disable IDS engine")
     parser.add_argument("--test-ids", metavar="IP", nargs="?", const="1.1.1.1", help="Test AbuseIPDB API against a public IP and exit")
@@ -242,7 +240,7 @@ def main():
         log.info("[WEB] Starting REST API on port 5000")
         start_api_server(ids_engine)
 
-    elif args.tui or args.ai:
+    elif args.tui:
         if ids_engine is None:
             print("ERROR: IDS engine required for TUI. Check your .env file for abuse_ipdb_api_key")
             sys.exit(1)
@@ -251,12 +249,8 @@ def main():
         proxy_thread.start()
 
         try:
-            if args.ai:
-                ai_tui = AITUI(ids_engine)
-                curses.wrapper(ai_tui.run)
-            else:
-                tui = TUI(ids_engine)
-                curses.wrapper(tui.run)
+            tui = TUI(ids_engine)
+            curses.wrapper(tui.run)
         except KeyboardInterrupt:
             pass
         finally:
