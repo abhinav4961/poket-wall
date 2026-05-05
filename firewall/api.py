@@ -13,9 +13,11 @@ from threading import Thread
 
 from firewall import BLACKLIST, is_blocked, build_blacklist, log
 from firewall import _request_times, _banned_ips, FLOOD_THRESHOLD, FLOOD_BAN_DURATION
+from inspection import get_inspector
 
 # These get set by main.py before the server starts
 ids_engine = None
+
 
 RULES_FILE = os.path.join(os.path.dirname(__file__), "rules.json")
 LOG_FILE = os.path.join(os.path.dirname(__file__), "logs", "piwall.log")
@@ -105,6 +107,8 @@ class APIHandler(BaseHTTPRequestHandler):
             self._handle_ai_stats()
         elif path == "/api/ai-ip":
             self._handle_ai_ip(query)
+        elif path == "/api/dpi-stats":
+            self._handle_dpi_stats()
         else:
             self._send_json({"error": "Not found"}, 404)
 
@@ -265,6 +269,10 @@ class APIHandler(BaseHTTPRequestHandler):
         if not ip:
             return self._send_json({"error": "No IP provided"}, 400)
         self._send_json(ids_engine.get_ip_ai_details(ip))
+
+    def _handle_dpi_stats(self):
+        inspector = get_inspector()
+        self._send_json(inspector.get_stats())
 
 
 # ─────────────────── SERVER ───────────────────

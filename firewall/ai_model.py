@@ -8,7 +8,7 @@ import json
 import math
 import os
 import time
-from collections import defaultdict, deque
+from collections import defaultdict
 from threading import Lock, Thread
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -24,7 +24,6 @@ FEATURE_NAMES = [
     "burst_count",
     "protocol_anomalies",
 ]
-NUM_FEATURES = len(FEATURE_NAMES)
 
 
 class FeatureExtractor:
@@ -97,7 +96,6 @@ class FeatureExtractor:
             return set(self._connections.keys())
 
     def reset_window(self, window_sec=60):
-        """Purge old data outside the analysis window."""
         now = time.time()
         cutoff = now - window_sec * 2
         with self._lock:
@@ -150,7 +148,6 @@ class IsolationForest:
 
     def load(self, path=MODEL_PATH):
         if not os.path.exists(path):
-            print(f"[AI] Model file not found at {path}")
             return False
         try:
             with open(path) as f:
@@ -158,10 +155,8 @@ class IsolationForest:
             self.trees = data["trees"]
             self.sample_size = data.get("sample_size", 256)
             self.contamination = data.get("contamination", 0.05)
-            print(f"[AI] Model loaded: {len(self.trees)} trees")
             return True
-        except Exception as e:
-            print(f"[AI] Failed to load model: {e}")
+        except Exception:
             return False
 
 
@@ -243,11 +238,9 @@ class AIEngine:
             print("[AI] Using adaptive baseline only")
 
     def start_background(self):
-        """Start periodic batch analysis thread."""
         self._running = True
         t = Thread(target=self._analysis_loop, daemon=True)
         t.start()
-        print(f"[AI] Batch analysis every {self._interval}s")
 
     def stop(self):
         self._running = False
@@ -264,13 +257,11 @@ class AIEngine:
         self.extractor.record_protocol_anomaly(ip)
 
     def _analysis_loop(self):
-        """Periodically analyze all tracked IPs."""
         while self._running:
             time.sleep(self._interval)
             self._run_analysis()
 
     def _run_analysis(self):
-        """Score all active IPs and generate alerts."""
         try:
             all_ips = self.extractor.get_all_ips()
             if not all_ips:
@@ -295,15 +286,14 @@ class AIEngine:
                     }
                     self._alerts.append(alert)
                     self._stats["total_alerts"] += 1
-                    log_msg = f"[AI-ALERT] {ip} {verdict} (score: {ai_score:.2f}) — {reason}"
-                    print(log_msg)
+                    print(f"[AI-ALERT] {ip} {verdict} (score: {ai_score:.2f}) — {reason}")
 
             self.baseline.add_scores(scores)
             self.extractor.reset_window()
             self._stats["total_analyses"] += 1
 
-        except Exception as e:
-            print(f"[AI] Analysis error: {e}")
+        except Exception:
+            pass
 
     def get_ai_stats(self):
         return {

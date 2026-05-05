@@ -18,8 +18,7 @@ from threading import Lock
 try:
     from ai_model import AIEngine
     AI_AVAILABLE = True
-except ImportError as e:
-    print(f"[IDS] AI module not available: {e}")
+except ImportError:
     AI_AVAILABLE = False
     AIEngine = None
 
@@ -98,14 +97,10 @@ class AbuseIPDBChecker:
             return result
 
         except urllib.error.HTTPError as e:
-            error_body = e.read().decode()
             if e.code == 429:
-                print(f"[IDS] AbuseIPDB rate limited")
-            else:
-                print(f"[IDS] AbuseIPDB HTTP {e.code}: {error_body}")
+                print("[IDS] AbuseIPDB rate limited")
             return None
-        except Exception as e:
-            print(f"[IDS] AbuseIPDB error: {e}")
+        except Exception:
             return None
 
 
@@ -124,7 +119,6 @@ class IPBlocker:
             self._method = "iptables"
         else:
             self._method = "memory"
-            print("[IDS] No root access — using in-memory blocking only")
 
     def _test_nftables(self) -> bool:
         try:
@@ -251,8 +245,7 @@ class IDSEngine:
             try:
                 self.ai = AIEngine(analysis_interval=60)
                 self.ai.start_background()
-            except Exception as e:
-                print(f"[IDS] AI engine failed to initialise: {e}")
+            except Exception:
                 self.ai = None
         else:
             self.ai = None
@@ -280,8 +273,8 @@ class IDSEngine:
             self.threshold_warn = cfg.get("score_threshold_warn", 40)
         except FileNotFoundError:
             pass
-        except Exception as e:
-            print(f"[IDS] config load error: {e}")
+        except Exception:
+            pass
 
     def save_config(self):
         try:
@@ -303,11 +296,10 @@ class IDSEngine:
                 data = json.load(f)
             now = time.time()
             for entry in data.get("blocks", []):
-                if now - entry["timestamp"] < entry.get("ttl", CACHE_TTL):
+                if now - entry["timestamp"] < entry.get("ttl", CACHE_TTL)):
                     self._blocked_ips.add(entry["ip"])
-            print(f"[IDS] Loaded {len(self._blocked_ips)} persistent blocks")
-        except Exception as e:
-            print(f"[IDS] Failed to load persistent blocks: {e}")
+        except Exception:
+            pass
 
     def _save_persistent_blocks(self):
         try:
@@ -320,8 +312,8 @@ class IDSEngine:
             }
             with open(BLOCKED_IPS_FILE, "w") as f:
                 json.dump(data, f, indent=2)
-        except Exception as e:
-            print(f"[IDS] Failed to save persistent blocks: {e}")
+        except Exception:
+            pass
 
     def record_traffic(self, ip: str, dest_port: int = 0, dest_host: str = "",
                        request: str = "", request_len: int = 0):
@@ -345,7 +337,6 @@ class IDSEngine:
         self.save_config()
 
     def check_ip(self, ip: str) -> str:
-        """Fast check: only persistent blocks + cached AbuseIPDB. AI runs in background."""
         if ip in self._blocked_ips:
             return "BLOCK"
 
@@ -463,9 +454,9 @@ def load_api_key() -> str:
                 if key.strip() == "abuse_ipdb_api_key":
                     return val.strip()
     except FileNotFoundError:
-        print(f"[IDS] .env file not found at {ENV_PATH}")
-    except Exception as e:
-        print(f"[IDS] Error reading .env: {e}")
+        pass
+    except Exception:
+        pass
     return ""
 
 

@@ -7,6 +7,7 @@ import time
 from firewall import is_blocked, check_flood, log
 from ids import IDSEngine, load_api_key, test_api_key
 from tui import TUI
+from inspection import get_inspector
 
 HOST = "0.0.0.0"
 PORT = 3128
@@ -40,27 +41,22 @@ def _recv_full_request(sock):
     return data.decode(errors="ignore")
 
 
-def _ids_check_async(ip, request=""):
-    """Run IDS analysis in background — never blocks the proxy."""
-    if not ids_engine:
-        return
-    try:
-        ids_engine.record_traffic(ip, request=request, request_len=len(request))
-        verdict = ids_engine.check_ip(ip)
-        if verdict == "BLOCK":
-            log.warning(f"[IDS] {ip} BLOCKED (background analysis)")
-            if ip in ids_engine._blocked_ips:
-                pass  # already blocked, next connection will be rejected
-    except Exception as e:
-        log.error(f"[IDS] background check error: {e}")
-
-
 def handle_client(client_sock, client_addr):
     ip = client_addr[0]
     try:
         client_sock.settimeout(5)
 
-        # Flood check — fast, no locks
+        if ids_engine:
+            ids_engine.record_traffic(ip)
+            verdict = ids_engine.check_ip(ip)
+            if verdict == "BLOCK":
+                log.warning(f"[IDS] {ip} BLOCKED (threat score / geo / AI)")
+                try:
+                    client_sock.send(b"HTTP/1.1 403 Forbidden\r\n\r\nBlocked by Pocket-Wall IDS\r\n")
+                finally:
+                    client_sock.close()
+                return
+
         if check_flood(ip):
             try:
                 client_sock.send(b"HTTP/1.1 429 Too Many Requests\r\n\r\n")
@@ -92,7 +88,22 @@ def handle_client(client_sock, client_addr):
 
         method, url = first_line[0], first_line[1]
 
-        # Parse host
+        # ── Deep Packet Inspection ──────────────────────────
+        inspector = get_inspector()
+        inspect_result = inspector.inspect(request, ip)
+        if inspect_result and inspect_result.is_malicious:
+            log.warning(f"[DPI] {ip} {inspect_result.attack_type} DETECTED: {inspect_result.pattern_matched}")
+            if inspect_result.severity >= 7 and ids_engine:
+                ids_engine.record_anomaly(ip)
+            try:
+                client_sock.send(b"HTTP/1.1 403 Forbidden\r\n\r\nRequest blocked by DPI\r\n")
+            finally:
+                client_sock.close()
+            return
+
+        if ids_engine:
+            ids_engine.record_traffic(ip, request=request, request_len=len(request))
+
         if method == "CONNECT":
             host = url
         else:
@@ -103,7 +114,6 @@ def handle_client(client_sock, client_addr):
 
         host_no_port = host.split(":")[0]
 
-        # Blocklist check — fast dict lookup
         if is_blocked(host_no_port):
             log.info(f"[{ip}] {host_no_port} BLOCKED")
             client_sock.send(b"HTTP/1.1 403 Forbidden\r\n\r\n")
@@ -111,10 +121,6 @@ def handle_client(client_sock, client_addr):
 
         log.info(f"[{ip}] {host_no_port} ALLOWED")
 
-        # Spawn IDS analysis in background — never blocks forwarding
-        threading.Thread(target=_ids_check_async, args=(ip, request), daemon=True).start()
-
-        # Forward traffic
         if method == "CONNECT":
             dest_host, dest_port = (host.split(":") + ["443"])[:2]
             try:
