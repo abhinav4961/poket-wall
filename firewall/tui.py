@@ -1,27 +1,21 @@
 """
-TUI Dashboard for Pocket-Wall IDS — built with curses (stdlib).
-Integrates Firewall + AI dashboards with seamless switching.
+TUI Dashboard for Pocket-Wall — simple 3-column layout.
+Left: All connections | Middle: Blocked | Right: AI Analysis
 """
 
 import curses
 import time
-from threading import Lock
-from ai_tui import AITUI
 
 SYM_SHIELD = "\u26e8"
 SYM_BLOCK  = "\u25cf"
 SYM_WARN   = "\u25b2"
 SYM_OK     = "\u2713"
-SYM_ARROW  = "\u25b6"
-SYM_ALERT  = "\u26a0"
-SYM_AI     = "\u25c6"
 SYM_LINE   = "\u2500"
 SYM_VLINE  = "\u2502"
 SYM_UL     = "\u250c"
 SYM_UR     = "\u2510"
 SYM_LL     = "\u2514"
 SYM_LR     = "\u2518"
-SYM_HORIZ  = "\u2501"
 
 
 def _safe_addstr(win, y, x, text, attr=0):
@@ -37,41 +31,22 @@ def _safe_addstr(win, y, x, text, attr=0):
         pass
 
 
-def _draw_box(win, y, x, h, w, title="", color=4):
-    if h < 2 or w < 2:
-        return
+def _draw_hline(win, y, x, w, color=4):
     try:
-        win.addch(y, x, SYM_UL, curses.color_pair(color))
-        win.addch(y, x + w - 1, SYM_UR, curses.color_pair(color))
-        win.addch(y + h - 1, x, SYM_LL, curses.color_pair(color))
-        win.addch(y + h - 1, x + w - 1, SYM_LR, curses.color_pair(color))
-        for i in range(1, w - 1):
-            win.addch(y, x + i, SYM_HORIZ, curses.color_pair(color))
-            win.addch(y + h - 1, x + i, SYM_HORIZ, curses.color_pair(color))
-        for i in range(1, h - 1):
-            win.addch(y + i, x, SYM_VLINE, curses.color_pair(color))
-            win.addch(y + i, x + w - 1, SYM_VLINE, curses.color_pair(color))
-        if title:
-            _safe_addstr(win, y, x + 2, f" {title} ", curses.color_pair(color) | curses.A_BOLD)
+        for i in range(w):
+            win.addch(y, x + i, SYM_LINE, curses.color_pair(color))
     except curses.error:
         pass
 
 
 class TUI:
-    """Curses-based IDS dashboard with integrated AI view."""
 
     def __init__(self, ids_engine):
         self.ids = ids_engine
         self._running = True
-        self._view = "firewall"
-        self._mode = "main"
-        self._geo_input = ""
-        self._thresh_input = ""
-        self._thresh_field = 0
-        self._scroll_traffic = 0
-        self._lock = Lock()
-        self._ai_tui = AITUI(ids_engine) if ids_engine.ai else None
-        self._ai_tui._embedded = True
+        self._scroll_conn = 0
+        self._scroll_blocked = 0
+        self._scroll_ai = 0
 
     def run(self, stdscr):
         curses.curs_set(0)
@@ -88,27 +63,21 @@ class TUI:
         curses.init_pair(6, curses.COLOR_WHITE, curses.COLOR_RED)
         curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_CYAN)
         curses.init_pair(8, curses.COLOR_BLACK, curses.COLOR_GREEN)
-        curses.init_pair(9, curses.COLOR_WHITE, curses.COLOR_MAGENTA)
-        curses.init_pair(10, curses.COLOR_RED, -1)
 
         while self._running:
             try:
                 stdscr.erase()
                 h, w = stdscr.getmaxyx()
 
-                if h < 20 or w < 60:
-                    _safe_addstr(stdscr, 0, 0, "Terminal too small. Need 60x20+", curses.A_BOLD | curses.color_pair(1))
+                if h < 10 or w < 40:
+                    _safe_addstr(stdscr, 0, 0, "Terminal too small (need 40x10)", curses.A_BOLD | curses.color_pair(1))
                     stdscr.refresh()
                     key = stdscr.getch()
                     if key == ord('q'):
                         self._running = False
                     continue
 
-                if self._view == "firewall":
-                    self._draw_firewall(stdscr, h, w)
-                elif self._view == "ai":
-                    self._ai_tui.draw(stdscr, h, w)
-
+                self._draw(stdscr, h, w)
                 stdscr.refresh()
 
                 key = stdscr.getch()
@@ -122,169 +91,80 @@ class TUI:
     def _handle_key(self, key):
         if key == -1:
             return
-
-        if self._view == "ai":
-            if key == ord('q'):
-                self._running = False
-            elif key == 27 or key == ord('f'):
-                self._view = "firewall"
-                self._ai_tui._mode = "overview"
-            else:
-                self._ai_tui.handle_key(key)
-            return
-
-        # Firewall view
         if key == ord('q'):
             self._running = False
-        elif key == ord('a') and self._ai_tui:
-            self._view = "ai"
-            return
+        elif key == curses.KEY_UP:
+            self._scroll_conn = max(0, self._scroll_conn - 1)
+        elif key == curses.KEY_DOWN:
+            self._scroll_conn += 1
+        elif key == ord('p'):
+            self._scroll_blocked = max(0, self._scroll_blocked - 1)
+        elif key == ord(';'):
+            self._scroll_blocked += 1
+        elif key == ord('c'):
+            self.ids.clear_alerts()
 
-        if self._mode == "geo":
-            if key == 27:
-                self._mode = "main"
-            elif key in (curses.KEY_ENTER, 10, 13):
-                self._process_geo_input()
-            elif key in (curses.KEY_BACKSPACE, 127, 8):
-                self._geo_input = self._geo_input[:-1]
-            elif 32 <= key <= 126:
-                self._geo_input += chr(key)
-        elif self._mode == "thresholds":
-            if key == 27:
-                self._mode = "main"
-            elif key == ord('\t'):
-                self._thresh_field = 1 - self._thresh_field
-                self._thresh_input = ""
-            elif key in (curses.KEY_ENTER, 10, 13):
-                self._process_thresh_input()
-            elif key in (curses.KEY_BACKSPACE, 127, 8):
-                self._thresh_input = self._thresh_input[:-1]
-            elif 48 <= key <= 57:
-                self._thresh_input += chr(key)
-        elif self._mode == "blocked":
-            if key == 27 or key == ord('b'):
-                self._mode = "main"
-            elif key == ord('u'):
-                ips = self.ids.get_blocked_ips()
-                if ips:
-                    self.ids.unblock_ip(ips[-1])
-        else:
-            # Main mode
-            if key == ord('g'):
-                self._mode = "geo"
-                self._geo_input = ""
-            elif key == ord('t'):
-                self._mode = "thresholds"
-                self._thresh_input = ""
-                self._thresh_field = 0
-            elif key == ord('c'):
-                self.ids.clear_alerts()
-            elif key == ord('b'):
-                self._mode = "blocked"
-            elif key == curses.KEY_UP:
-                self._scroll_traffic = max(0, self._scroll_traffic - 1)
-            elif key == curses.KEY_DOWN:
-                self._scroll_traffic += 1
-
-    def _process_geo_input(self):
-        raw = self._geo_input.strip().upper()
-        if not raw:
-            return
-        if raw.startswith("-"):
-            code = raw[1:].strip()
-            if len(code) == 2:
-                self.ids.remove_country(code)
-        else:
-            code = raw.lstrip("+").strip()
-            if len(code) == 2:
-                self.ids.add_country(code)
-        self._geo_input = ""
-
-    def _process_thresh_input(self):
-        try:
-            val = int(self._thresh_input)
-            val = max(0, min(100, val))
-            if self._thresh_field == 0:
-                self.ids.threshold_block = val
-            else:
-                self.ids.threshold_warn = val
-            self.ids.save_config()
-        except ValueError:
-            pass
-        self._thresh_input = ""
-
-    def _draw_firewall(self, stdscr, h, w):
+    def _draw(self, stdscr, h, w):
         now = time.strftime("%H:%M:%S")
-        title = f" {SYM_SHIELD}  POCKET-WALL FIREWALL  |  {now}  "
-        _safe_addstr(stdscr, 0, 0, title.center(w), curses.color_pair(7) | curses.A_BOLD)
-        _safe_addstr(stdscr, 1, 0, SYM_LINE * w, curses.color_pair(4))
+        title = f" {SYM_SHIELD}  POCKET-WALL  |  {now}  ".center(w)
+        _safe_addstr(stdscr, 0, 0, title, curses.color_pair(7) | curses.A_BOLD)
 
         stats = self.ids.stats
+        stat_line = f"Total: {stats.total}  Allowed: {stats.allowed}  Blocked: {stats.blocked}  Warned: {stats.warned}"
+        _safe_addstr(stdscr, 1, 2, stat_line, curses.color_pair(4) | curses.A_BOLD)
+        _draw_hline(stdscr, 2, 0, w)
 
-        if self._mode == "main":
-            bar_w = w - 4
-            bar_y = 3
-            _safe_addstr(stdscr, bar_y, 2, f" Total: {stats.total}  Blocked: {stats.blocked}  Warned: {stats.warned}  Allowed: {stats.allowed} ", curses.color_pair(4) | curses.A_BOLD)
+        split1 = w // 3
+        split2 = (w * 2) // 3
+        top = 3
+        content_h = h - 7
 
-            if stats.total > 0:
-                bar_y += 1
-                blocked_w = int((stats.blocked / stats.total) * bar_w)
-                warned_w = int((stats.warned / stats.total) * bar_w)
-                allowed_w = bar_w - blocked_w - warned_w
-                _safe_addstr(stdscr, bar_y, 2, SYM_BLOCK * max(blocked_w, 0), curses.color_pair(1))
-                _safe_addstr(stdscr, bar_y, 2 + blocked_w, SYM_WARN * max(warned_w, 0), curses.color_pair(2))
-                _safe_addstr(stdscr, bar_y, 2 + blocked_w + warned_w, SYM_OK * max(allowed_w, 0), curses.color_pair(3))
+        # Column headers
+        _safe_addstr(stdscr, top, 1, " ALL CONNECTIONS ", curses.color_pair(3) | curses.A_BOLD)
+        _draw_hline(stdscr, top, split1, 1)
+        _safe_addstr(stdscr, top, split1 + 2, " BLOCKED & ALERTS ", curses.color_pair(1) | curses.A_BOLD)
+        _draw_hline(stdscr, top, split2, 1)
+        _safe_addstr(stdscr, top, split2 + 2, " AI ANALYSIS ", curses.color_pair(5) | curses.A_BOLD)
 
-            split = w // 2
-            panel_top = 6
-            panel_h = h - 11
+        # Vertical dividers
+        for i in range(top + 1, top + content_h + 1):
+            try:
+                stdscr.addch(i, split1, SYM_VLINE, curses.color_pair(4))
+                stdscr.addch(i, split2, SYM_VLINE, curses.color_pair(4))
+            except curses.error:
+                pass
 
-            _draw_box(stdscr, panel_top, 1, panel_h, split - 1, f" {SYM_ARROW} LIVE TRAFFIC ", 4)
-            _draw_box(stdscr, panel_top, split, panel_h, w - split - 1, f" {SYM_ALERT} ALERTS ", 1)
+        # Column 1: All Connections
+        self._draw_connections(stdscr, top + 1, 1, split1 - 2, content_h)
 
-            self._draw_traffic(stdscr, panel_top + 1, 2, split - 3, panel_h - 2)
-            self._draw_alerts(stdscr, panel_top + 1, split + 1, w - split - 3, panel_h - 2)
+        # Column 2: Blocked & Alerts
+        self._draw_blocked(stdscr, top + 1, split1 + 2, split2 - split1 - 3, content_h)
 
-            bottom_y = panel_top + panel_h
-            _safe_addstr(stdscr, bottom_y, 0, SYM_LINE * w, curses.color_pair(4))
+        # Column 3: AI Analysis
+        self._draw_ai(stdscr, top + 1, split2 + 2, w - split2 - 3, content_h)
 
-            geo_str = ", ".join(sorted(self.ids.blocked_countries)) if self.ids.blocked_countries else "None"
-            _safe_addstr(stdscr, bottom_y + 1, 2,
-                         f"GEO-BLOCKED: {geo_str}  |  Block: >= {self.ids.threshold_block}%  Warn: >= {self.ids.threshold_warn}%  |  Method: {self.ids.blocker.get_method()}",
-                         curses.color_pair(5))
+        # Footer
+        footer_y = top + content_h + 1
+        _draw_hline(stdscr, footer_y, 0, w)
+        _safe_addstr(stdscr, footer_y + 1, 2, "[q]Quit [c]Clear alerts [Up/Dn]Scroll connections [p/;]Scroll blocked",
+                     curses.color_pair(8) | curses.A_BOLD)
 
-            keys = "[q]Quit [a]AI [g]Geo [t]Threshold [c]Clear [b]Blocked [Up/Down]Scroll"
-            _safe_addstr(stdscr, h - 2, 2, keys, curses.color_pair(8) | curses.A_BOLD)
+        geo = ", ".join(sorted(self.ids.blocked_countries)) if self.ids.blocked_countries else "None"
+        _safe_addstr(stdscr, h - 1, 2, f"Geo: {geo}  |  Blocker: {self.ids.blocker.get_method()}  |  Block threshold: {self.ids.threshold_block}%", curses.color_pair(5))
 
-            block_pct = stats.blocked / max(stats.total, 1) * 100
-            _safe_addstr(stdscr, h - 1, 2,
-                         f"Block Rate: {block_pct:.1f}%  |  Alerts: {len(self.ids.alerts)}  |  Blocked IPs: {len(self.ids.get_blocked_ips())}",
-                         curses.color_pair(10))
-
-        elif self._mode == "geo":
-            self._draw_geo(stdscr, h, w)
-        elif self._mode == "thresholds":
-            self._draw_thresholds(stdscr, h, w)
-        elif self._mode == "blocked":
-            self._draw_blocked(stdscr, h, w)
-
-    def _draw_traffic(self, win, start_y, start_x, width, height):
+    def _draw_connections(self, win, y, x, w, h):
         events = list(self.ids.events)
         if not events:
-            _safe_addstr(win, start_y, start_x, "Waiting for traffic...", curses.color_pair(4))
+            _safe_addstr(win, y, x, "Waiting...", curses.color_pair(4))
             return
 
         total = len(events)
-        max_scroll = max(0, total - height)
-        if self._scroll_traffic > max_scroll:
-            self._scroll_traffic = max_scroll
-
-        visible = events[max(0, total - height - self._scroll_traffic):total - self._scroll_traffic] if self._scroll_traffic > 0 else events[max(0, total - height):]
+        start = min(self._scroll_conn, max(0, total - h))
+        visible = events[start:start + h]
 
         for i, ev in enumerate(visible):
-            if i >= height:
+            if i >= h:
                 break
-            y = start_y + i
             ts = time.strftime("%H:%M:%S", time.localtime(ev.timestamp))
 
             if ev.action == "BLOCK":
@@ -297,91 +177,76 @@ class TUI:
                 sym = SYM_OK
                 color = curses.color_pair(3)
 
-            line = f"{ts} {ev.ip:<16} {ev.country:>3} {sym} {ev.score:>3}%  {ev.reason[:max(width - 40, 1)]}"
-            _safe_addstr(win, y, start_x, line[:width], color)
+            line = f"{ts} {sym} {ev.ip:<16} {ev.country:>3} {ev.score:>3}% {ev.reason[:w-36]}"
+            _safe_addstr(win, y + i, x, line[:w], color)
 
-    def _draw_alerts(self, win, start_y, start_x, width, height):
-        alerts = list(self.ids.alerts)
-        if not alerts:
-            _safe_addstr(win, start_y, start_x, "No alerts yet.", curses.color_pair(3))
+    def _draw_blocked(self, win, y, x, w, h):
+        blocked = [e for e in self.ids.events if e.action == "BLOCK"]
+        warned = [e for e in self.ids.events if e.action == "WARN"]
+        items = blocked + warned
+
+        if not items:
+            _safe_addstr(win, y, x, "All clear", curses.color_pair(3))
             return
 
-        alerts = list(reversed(alerts))
-        row = 0
-        for ev in alerts:
-            if row >= height:
+        items = list(reversed(items))
+        start = min(self._scroll_blocked, max(0, len(items) - h))
+        visible = items[start:start + h]
+
+        for i, ev in enumerate(visible):
+            if i >= h:
                 break
             ts = time.strftime("%H:%M:%S", time.localtime(ev.timestamp))
+            sym = SYM_BLOCK if ev.action == "BLOCK" else SYM_WARN
+            color = curses.color_pair(1) if ev.action == "BLOCK" else curses.color_pair(2)
 
-            if ev.action == "BLOCK":
-                sym = SYM_BLOCK
-                color = curses.color_pair(1) | curses.A_BOLD
-            else:
-                sym = SYM_WARN
-                color = curses.color_pair(2)
+            line = f"{ts} {sym} {ev.ip:<16} S:{ev.score} {ev.reason[:w-30]}"
+            _safe_addstr(win, y + i, x, line[:w], color | curses.A_BOLD)
 
-            line = f"{sym} {ts} {ev.ip:<16} S:{ev.score}% {ev.country}"
-            _safe_addstr(win, start_y + row, start_x, line[:width], color)
+    def _draw_ai(self, win, y, x, w, h):
+        ai = self.ids.ai if hasattr(self.ids, 'ai') else None
+        row = y
+
+        if not ai:
+            _safe_addstr(win, row, x, "AI disabled", curses.color_pair(1) | curses.A_BOLD)
+            return
+
+        stats = ai.get_ai_stats()
+        baseline = stats.get("baseline", {})
+        suspicious = ai.get_suspicious_ips()
+        alerts = ai.get_alerts(10)
+
+        _safe_addstr(win, row, x, f"Model: {'ON' if stats.get('model_loaded') else 'OFF'}", curses.color_pair(4) | curses.A_BOLD)
+        row += 1
+        _safe_addstr(win, row, x, f"Alerts: {stats.get('total_alerts', 0)}", curses.color_pair(2))
+        row += 1
+        _safe_addstr(win, row, x, f"Threshold: {baseline.get('threshold', 0):.3f}", curses.color_pair(5))
+        row += 1
+
+        if suspicious:
+            _safe_addstr(win, row, x, f"Suspicious: {len(suspicious)}", curses.color_pair(1) | curses.A_BOLD)
+            row += 1
+            top_susp = sorted(suspicious.items(), key=lambda s: s[1], reverse=True)[:5]
+            for ip, score in top_susp:
+                if row >= y + h:
+                    break
+                risk = "CRIT" if score >= 0.85 else "HIGH" if score >= 0.7 else "MED" if score >= 0.5 else "LOW"
+                color = curses.color_pair(1) if score >= 0.7 else curses.color_pair(2)
+                bar = "\u2588" * int(score * 10) + "\u2591" * (10 - int(score * 10))
+                _safe_addstr(win, row, x, f"  {ip:<16} {bar} {score:.2f} {risk}", color)
+                row += 1
+        else:
+            _safe_addstr(win, row, x, "Suspicious: None", curses.color_pair(3))
             row += 1
 
-            if row < height:
-                reason = f"  {ev.reason[:width-3]}"
-                _safe_addstr(win, start_y + row, start_x, reason[:width], curses.color_pair(4))
-                row += 1
-
-    def _draw_geo(self, stdscr, h, w):
-        _safe_addstr(stdscr, 0, 0, " GEO-BLOCK EDITOR ", curses.color_pair(7) | curses.A_BOLD)
-        _safe_addstr(stdscr, 1, 0, SYM_LINE * w, curses.color_pair(4))
-
-        _safe_addstr(stdscr, 3, 2, "Currently blocked countries:", curses.color_pair(4) | curses.A_BOLD)
-
-        if self.ids.blocked_countries:
-            countries = sorted(self.ids.blocked_countries)
-            for i in range(0, len(countries), 10):
-                row_str = "  ".join(countries[i:i+10])
-                _safe_addstr(stdscr, 5 + i // 10, 4, row_str, curses.color_pair(1) | curses.A_BOLD)
-        else:
-            _safe_addstr(stdscr, 5, 4, "(none — add countries below)", curses.color_pair(3))
-
-        _safe_addstr(stdscr, h - 6, 2, "Type a 2-letter country code to ADD (e.g. CN)", curses.color_pair(4))
-        _safe_addstr(stdscr, h - 5, 2, "Prefix with - to REMOVE (e.g. -CN)", curses.color_pair(4))
-        _safe_addstr(stdscr, h - 4, 2, "Press ENTER to apply, ESC to go back", curses.color_pair(4))
-
-        _safe_addstr(stdscr, h - 2, 2, f"Input: {self._geo_input}_", curses.color_pair(5) | curses.A_BOLD)
-
-    def _draw_thresholds(self, stdscr, h, w):
-        _safe_addstr(stdscr, 0, 0, " THRESHOLD SETTINGS ", curses.color_pair(7) | curses.A_BOLD)
-        _safe_addstr(stdscr, 1, 0, SYM_LINE * w, curses.color_pair(4))
-
-        block_color = curses.color_pair(1) | curses.A_BOLD if self._thresh_field == 0 else curses.color_pair(4)
-        warn_color = curses.color_pair(2) | curses.A_BOLD if self._thresh_field == 1 else curses.color_pair(4)
-
-        _safe_addstr(stdscr, 3, 2, f"{'>' if self._thresh_field == 0 else ' '} Block threshold: {self.ids.threshold_block}%",
-                     block_color)
-        _safe_addstr(stdscr, 4, 2, "  (IPs with score >= this are BLOCKED)", curses.color_pair(4))
-
-        _safe_addstr(stdscr, 6, 2, f"{'>' if self._thresh_field == 1 else ' '} Warn threshold:  {self.ids.threshold_warn}%",
-                     warn_color)
-        _safe_addstr(stdscr, 7, 2, "  (IPs with score >= this get a WARNING)", curses.color_pair(4))
-
-        _safe_addstr(stdscr, 9, 2, "TAB to switch fields, type a number, ENTER to set", curses.color_pair(4))
-        _safe_addstr(stdscr, 10, 2, "ESC to go back", curses.color_pair(4))
-
-        _safe_addstr(stdscr, h - 2, 2, f"New value: {self._thresh_input}_", curses.color_pair(5) | curses.A_BOLD)
-
-    def _draw_blocked(self, stdscr, h, w):
-        _safe_addstr(stdscr, 0, 0, " BLOCKED IPs ", curses.color_pair(7) | curses.A_BOLD)
-        _safe_addstr(stdscr, 1, 0, SYM_LINE * w, curses.color_pair(4))
-
-        ips = self.ids.get_blocked_ips()
-        if not ips:
-            _safe_addstr(stdscr, 3, 2, "No IPs currently blocked.", curses.color_pair(3))
-        else:
-            for i, ip in enumerate(ips):
-                if i + 3 >= h - 3:
-                    _safe_addstr(stdscr, i + 3, 2, f"... and {len(ips) - i} more", curses.color_pair(4))
+        if alerts and row < y + h - 2:
+            row += 1
+            _safe_addstr(win, row, x, "Recent AI:", curses.color_pair(5) | curses.A_BOLD)
+            row += 1
+            for a in reversed(alerts[-3:]):
+                if row >= y + h:
                     break
-                _safe_addstr(stdscr, i + 3, 2, f"{SYM_BLOCK} {ip}", curses.color_pair(1))
-
-        _safe_addstr(stdscr, h - 3, 2, "[u] Unblock last IP", curses.color_pair(4))
-        _safe_addstr(stdscr, h - 2, 2, "[ESC/b] Back to main", curses.color_pair(4))
+                ts = time.strftime("%H:%M", time.localtime(a.get("timestamp", 0)))
+                v = a.get("verdict", "?")[0]
+                _safe_addstr(win, row, x, f"  {ts} {v} {a.get('ip', '?'):16} {a.get('score', 0):.2f}", curses.color_pair(4))
+                row += 1
