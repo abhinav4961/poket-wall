@@ -109,6 +109,12 @@ class APIHandler(BaseHTTPRequestHandler):
             self._handle_ai_ip(query)
         elif path == "/api/dpi-stats":
             self._handle_dpi_stats()
+        elif path == "/api/port-scan-stats":
+            self._handle_port_scan_stats()
+        elif path == "/api/brute-force-stats":
+            self._handle_brute_force_stats()
+        elif path == "/api/honeypot-stats":
+            self._handle_honeypot_stats()
         else:
             self._send_json({"error": "Not found"}, 404)
 
@@ -127,6 +133,14 @@ class APIHandler(BaseHTTPRequestHandler):
             self._handle_unblock(body)
         elif path == "/api/check-domain":
             self._handle_check_domain(body)
+        elif path == "/api/clear-port-scan":
+            self._handle_clear_port_scan()
+        elif path == "/api/clear-brute-force":
+            self._handle_clear_brute_force()
+        elif path == "/api/honeypot/add":
+            self._handle_honeypot_add(body)
+        elif path == "/api/honeypot/remove":
+            self._handle_honeypot_remove(body)
         else:
             self._send_json({"error": "Not found"}, 404)
 
@@ -273,6 +287,51 @@ class APIHandler(BaseHTTPRequestHandler):
     def _handle_dpi_stats(self):
         inspector = get_inspector()
         self._send_json(inspector.get_stats())
+
+    def _handle_port_scan_stats(self):
+        if ids_engine is None:
+            return self._send_json({"error": "IDS not running"}, 503)
+        self._send_json(ids_engine.get_port_scan_stats())
+
+    def _handle_clear_port_scan(self):
+        if ids_engine is None:
+            return self._send_json({"error": "IDS not running"}, 503)
+        ids_engine.clear_port_scan_tracker()
+        self._send_json({"status": "cleared"})
+
+    def _handle_brute_force_stats(self):
+        if ids_engine is None:
+            return self._send_json({"error": "IDS not running"}, 503)
+        self._send_json(ids_engine.get_brute_force_stats())
+
+    def _handle_clear_brute_force(self):
+        if ids_engine is None:
+            return self._send_json({"error": "IDS not running"}, 503)
+        ids_engine.clear_brute_force_tracker()
+        self._send_json({"status": "cleared"})
+
+    def _handle_honeypot_stats(self):
+        if ids_engine is None:
+            return self._send_json({"error": "IDS not running"}, 503)
+        self._send_json(ids_engine.get_honeypot_stats())
+
+    def _handle_honeypot_add(self, body):
+        if ids_engine is None:
+            return self._send_json({"error": "IDS not running"}, 503)
+        path = body.get("path", "").strip()
+        if not path:
+            return self._send_json({"error": "No path provided"}, 400)
+        ids_engine.add_honeypot_path(path)
+        self._send_json({"ok": True, "paths": sorted(ids_engine.honeypot_paths)})
+
+    def _handle_honeypot_remove(self, body):
+        if ids_engine is None:
+            return self._send_json({"error": "IDS not running"}, 503)
+        path = body.get("path", "").strip()
+        if not path:
+            return self._send_json({"error": "No path provided"}, 400)
+        ids_engine.remove_honeypot_path(path)
+        self._send_json({"ok": True, "paths": sorted(ids_engine.honeypot_paths)})
 
 
 # ─────────────────── SERVER ───────────────────

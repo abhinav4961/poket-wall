@@ -7,7 +7,11 @@ A lightweight proxy-based firewall with AI-powered intrusion detection, built in
 - **Proxy Server** — HTTP & HTTPS (CONNECT) traffic filtering on port 3128
 - **Domain Blocklisting** — StevenBlack + URLHaus blocklists with custom rules, parent domain matching
 - **IDS Engine** — AbuseIPDB threat intelligence + geo-blocking + nftables/iptables IP blocking
-- **AI Behavioral Analysis** — Pre-trained Isolation Forest detects port scans, brute force, DDoS, and anomaly patterns (batch mode, runs every 60s)
+- **AI Behavioral Analysis** — Pre-trained Isolation Forest detects anomaly patterns (batch mode, runs every 60s)
+- **Deep Packet Inspection** — Detects SQLi, XSS, path traversal, command injection (inspection.py)
+- **Port Scan Detection** — Blocks IPs probing multiple ports in a short time window
+- **Brute Force Detection** — Blocks IPs with repeated errors (e.g., failed auth attempts)
+- **Honeypot Module** — Fake endpoints that auto-block any IP that touches them
 - **Flood Protection** — Per-IP rate limiting with automatic ban windows
 - **REST API** — Full dashboard API on port 5000 with stats, events, alerts, and management endpoints
 - **TUI Dashboard** — Terminal-based monitoring interface
@@ -66,11 +70,14 @@ abuse_ipdb_api_key=YOUR_KEY_HERE
 
 ```
 Client ──▶ Proxy (main.py) ──▶ Blocklist Check (firewall.py) ──▶ Forward Traffic
-                                     │
-                                     └──▶ Background IDS (ids.py)
-                                           ├── AbuseIPDB reputation
-                                           ├── Geo-blocking
-                                           └── AI anomaly detection (ai_model.py)
+                                      │
+                                      └──▶ Background IDS (ids.py)
+                                            ├── AbuseIPDB reputation
+                                            ├── Geo-blocking
+                                            ├── Port Scan Detection
+                                            ├── Brute Force Detection
+                                            ├── Honeypot Module
+                                            └── AI anomaly detection (ai_model.py)
 ```
 
 ### How the AI Works
@@ -102,6 +109,10 @@ This generates a new `ai_model.json` you can deploy to the Pi.
 | `/api/alerts` | GET | Active alerts |
 | `/api/ai-stats` | GET | AI model status and baseline |
 | `/api/ai-ip?ip=X` | GET | Per-IP AI analysis details |
+| `/api/dpi-stats` | GET | Deep Packet Inspection stats |
+| `/api/port-scan-stats` | GET | Port scan detection stats |
+| `/api/brute-force-stats` | GET | Brute force detection stats |
+| `/api/honeypot-stats` | GET | Honeypot module stats |
 | `/api/rules` | GET/POST | Manage custom blocklist |
 | `/api/geo` | GET/POST | Manage geo-blocking config |
 | `/api/blocked-ips` | GET | List blocked IPs |
@@ -109,6 +120,10 @@ This generates a new `ai_model.json` you can deploy to the Pi.
 | `/api/logs` | GET | View proxy logs |
 | `/api/flood-status` | GET | Current flood protection state |
 | `/api/check-domain` | POST | Check if a domain is blocked |
+| `/api/clear-port-scan` | POST | Clear port scan tracker |
+| `/api/clear-brute-force` | POST | Clear brute force tracker |
+| `/api/honeypot/add` | POST | Add honeypot path |
+| `/api/honeypot/remove` | POST | Remove honeypot path |
 
 ## File Structure
 

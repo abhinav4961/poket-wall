@@ -43,11 +43,12 @@ def _recv_full_request(sock):
 
 def handle_client(client_sock, client_addr):
     ip = client_addr[0]
+    dest_port = 0
+    dest_host = ""
     try:
         client_sock.settimeout(5)
 
         if ids_engine:
-            ids_engine.record_traffic(ip)
             verdict = ids_engine.check_ip(ip)
             if verdict == "BLOCK":
                 log.warning(f"[IDS] {ip} BLOCKED (threat score / geo / AI)")
@@ -101,40 +102,55 @@ def handle_client(client_sock, client_addr):
                 client_sock.close()
             return
 
-        if ids_engine:
-            ids_engine.record_traffic(ip, request=request, request_len=len(request))
+        # ── Honeypot check (HTTP only) ──────────────────────────
+        if method != "CONNECT" and ids_engine and ids_engine.honeypot_enabled:
+            from urllib.parse import urlparse
+            try:
+                parsed = urlparse(url)
+                path = parsed.path
+                if ids_engine.check_honeypot(ip, path):
+                    try:
+                        client_sock.send(b"HTTP/1.1 403 Forbidden\r\n\r\nHoneypot triggered\r\n")
+                    finally:
+                        client_sock.close()
+                    return
+            except Exception:
+                pass
 
         if method == "CONNECT":
             host = url
+            dest_host, dest_port = (host.split(":") + ["443"])[:2]
+            try:
+                dest_port = int(dest_port)
+            except ValueError:
+                dest_port = 443
         else:
             try:
-                host = url.split("/")[2]
+                dest_host = url.split("/")[2]
             except IndexError:
                 return
+            dest_host = dest_host.split(":")[0]
+            dest_port = int(host.split(":")[1]) if ":" in host else 80
 
-        host_no_port = host.split(":")[0]
+        if ids_engine:
+            ids_engine.record_traffic(ip, dest_port=dest_port, dest_host=dest_host, request=request, request_len=len(request))
+
+        host_no_port = dest_host
 
         if is_blocked(host_no_port):
             log.info(f"[{ip}] {host_no_port} BLOCKED")
             client_sock.send(b"HTTP/1.1 403 Forbidden\r\n\r\n")
             return
 
-        log.info(f"[{ip}] {host_no_port} ALLOWED")
+        log.info(f"[{ip}] {dest_host}:{dest_port} ALLOWED")
 
         if method == "CONNECT":
-            dest_host, dest_port = (host.split(":") + ["443"])[:2]
-            try:
-                dest_port = int(dest_port)
-            except ValueError:
-                dest_port = 443
             log.info(f"[{ip}] CONNECT {dest_host}:{dest_port}")
             server = socket.create_connection((dest_host, dest_port), timeout=15)
             client_sock.settimeout(None)
             client_sock.send(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             _pipe_bidirectional(client_sock, server)
         else:
-            dest_host = host_no_port
-            dest_port = int(host.split(":")[1]) if ":" in host else 80
             log.info(f"[{ip}] HTTP {dest_host}:{dest_port}")
             server = socket.create_connection((dest_host, dest_port), timeout=10)
             server.sendall(request.encode())

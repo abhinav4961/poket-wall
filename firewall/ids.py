@@ -262,6 +262,26 @@ class IDSEngine:
         self.threshold_warn = 40
         self._load_config()
 
+        # Port scan detection
+        self._port_scan_tracker: dict[str, list[tuple[float, int]]] = {}
+        self.port_scan_ports_threshold = 10
+        self.port_scan_time_window = 60
+        self.port_scan_enabled = True
+
+        # Brute force detection
+        self._brute_force_tracker: dict[str, list[float]] = {}
+        self.brute_force_threshold = 5
+        self.brute_force_time_window = 60
+        self.brute_force_enabled = True
+
+        # Honeypot module
+        self.honeypot_enabled = True
+        self.honeypot_paths = {
+            "/admin", "/wp-admin", "/phpmyadmin", "/.env",
+            "/config.json", "/backup.zip", "/.git/config",
+            "/api/debug", "/test.php",
+        }
+
     def _load_config(self):
         try:
             with open(GEO_RULES_PATH) as f:
@@ -317,12 +337,98 @@ class IDSEngine:
 
     def record_traffic(self, ip: str, dest_port: int = 0, dest_host: str = "",
                        request: str = "", request_len: int = 0):
+        if self.port_scan_enabled and dest_port > 0:
+            self._check_port_scan(ip, dest_port)
+
         if self.ai:
             self.ai.record(ip, dest_port, dest_host, request, request_len)
 
+    def _check_port_scan(self, ip: str, port: int):
+        now = time.time()
+        with self._lock:
+            if ip not in self._port_scan_tracker:
+                self._port_scan_tracker[ip] = []
+            tracker = self._port_scan_tracker[ip]
+            tracker.append((now, port))
+            cutoff = now - self.port_scan_time_window
+            self._port_scan_tracker[ip] = [
+                (ts, p) for ts, p in tracker if ts > cutoff
+            ]
+            unique_ports = len(set(p for _, p in self._port_scan_tracker[ip]))
+            if unique_ports >= self.port_scan_ports_threshold:
+                if ip not in self._blocked_ips:
+                    print(f"[IDS] Port scan detected from {ip} ({unique_ports} ports in {self.port_scan_time_window}s)")
+                    self._block_ip(ip)
+                    reason = f"Port scan detected: {unique_ports} ports"
+                    ev = IDSEvent(
+                        timestamp=now,
+                        ip=ip,
+                        score=90,
+                        country="???",
+                        isp="Unknown",
+                        action="BLOCK",
+                        reason=reason,
+                    )
+                    self._record(ev)
+                del self._port_scan_tracker[ip]
+
     def record_error(self, ip: str):
+        if self.brute_force_enabled:
+            self._check_brute_force(ip)
         if self.ai:
             self.ai.record_error(ip)
+
+    def check_honeypot(self, ip: str, path: str) -> bool:
+        """Returns True if path is a honeypot and IP should be blocked."""
+        if not self.honeypot_enabled:
+            return False
+        normalized = path.split("?")[0].rstrip("/").lower()
+        for trap in self.honeypot_paths:
+            if normalized == trap.rstrip("/").lower():
+                if ip not in self._blocked_ips:
+                    print(f"[IDS] Honeypot triggered: {ip} accessed {path}")
+                    self._block_ip(ip)
+                    reason = f"Honeypot triggered: {path}"
+                    ev = IDSEvent(
+                        timestamp=time.time(),
+                        ip=ip,
+                        score=95,
+                        country="???",
+                        isp="Unknown",
+                        action="BLOCK",
+                        reason=reason,
+                    )
+                    self._record(ev)
+                return True
+        return False
+
+    def _check_brute_force(self, ip: str):
+        now = time.time()
+        with self._lock:
+            if ip not in self._brute_force_tracker:
+                self._brute_force_tracker[ip] = []
+            tracker = self._brute_force_tracker[ip]
+            tracker.append(now)
+            cutoff = now - self.brute_force_time_window
+            self._brute_force_tracker[ip] = [ts for ts in tracker if ts > cutoff]
+            attempt_count = len(self._brute_force_tracker[ip])
+            if attempt_count >= self.brute_force_threshold:
+                if ip not in self._blocked_ips:
+                    print(f"[IDS] Brute force detected from {ip} ({attempt_count} errors in {self.brute_force_time_window}s)")
+                    self._block_ip(ip)
+                    reason = f"Brute force detected: {attempt_count} errors"
+                    ev = IDSEvent(
+                        timestamp=now,
+                        ip=ip,
+                        score=85,
+                        country="???",
+                        isp="Unknown",
+                        action="BLOCK",
+                        reason=reason,
+                    )
+                    self._record(ev)
+                if ip in self._brute_force_tracker:
+                    del self._brute_force_tracker[ip]
 
     def record_anomaly(self, ip: str):
         if self.ai:
@@ -441,6 +547,60 @@ class IDSEngine:
         if self.ai:
             return self.ai.get_alerts(limit)
         return []
+
+    def get_port_scan_stats(self) -> dict:
+        with self._lock:
+            return {
+                "enabled": self.port_scan_enabled,
+                "threshold_ports": self.port_scan_ports_threshold,
+                "time_window": self.port_scan_time_window,
+                "tracking": len(self._port_scan_tracker),
+                "tracked_ips": [
+                    {
+                        "ip": ip,
+                        "unique_ports": len(set(p for _, p in entries)),
+                        "last_seen": max(ts for ts, _ in entries) if entries else 0,
+                    }
+                    for ip, entries in self._port_scan_tracker.items()
+                ],
+            }
+
+    def clear_port_scan_tracker(self):
+        with self._lock:
+            self._port_scan_tracker.clear()
+
+    def get_brute_force_stats(self) -> dict:
+        with self._lock:
+            return {
+                "enabled": self.brute_force_enabled,
+                "threshold": self.brute_force_threshold,
+                "time_window": self.brute_force_time_window,
+                "tracking": len(self._brute_force_tracker),
+                "tracked_ips": [
+                    {
+                        "ip": ip,
+                        "attempts": len(timestamps),
+                        "last_seen": max(timestamps) if timestamps else 0,
+                    }
+                    for ip, timestamps in self._brute_force_tracker.items()
+                ],
+            }
+
+    def clear_brute_force_tracker(self):
+        with self._lock:
+            self._brute_force_tracker.clear()
+
+    def get_honeypot_stats(self) -> dict:
+        return {
+            "enabled": self.honeypot_enabled,
+            "paths": sorted(self.honeypot_paths),
+        }
+
+    def add_honeypot_path(self, path: str):
+        self.honeypot_paths.add(path)
+
+    def remove_honeypot_path(self, path: str):
+        self.honeypot_paths.discard(path)
 
 
 def load_api_key() -> str:
