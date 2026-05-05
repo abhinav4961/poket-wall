@@ -250,6 +250,11 @@ def main():
         proxy_thread = threading.Thread(target=start_proxy, daemon=True)
         proxy_thread.start()
 
+        from api import start_api_server
+        api_thread = threading.Thread(target=start_api_server, args=(ids_engine,), daemon=True)
+        api_thread.start()
+        log.info("[API] REST server running on port 5000 (background)")
+
         try:
             tui = TUI(ids_engine)
             curses.wrapper(tui.run)
