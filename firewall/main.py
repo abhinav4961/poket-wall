@@ -241,6 +241,8 @@ def main():
         start_api_server(ids_engine)
 
     elif args.tui:
+        from firewall import disable_console_logging
+        disable_console_logging()
         if ids_engine is None:
             print("ERROR: IDS engine required for TUI. Check your .env file for abuse_ipdb_api_key")
             sys.exit(1)

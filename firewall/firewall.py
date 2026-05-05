@@ -19,11 +19,27 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
         logging.FileHandler("logs/piwall.log"),
-        logging.StreamHandler()
     ]
 )
 
 log = logging.getLogger("piwall")
+_log_to_console = False
+
+
+def enable_console_logging():
+    global _log_to_console
+    if not _log_to_console:
+        log.addHandler(logging.StreamHandler())
+        _log_to_console = True
+
+
+def disable_console_logging():
+    global _log_to_console
+    if _log_to_console:
+        for handler in log.handlers[:]:
+            if isinstance(handler, logging.StreamHandler):
+                log.removeHandler(handler)
+        _log_to_console = False
 
 BLOCKLIST_SOURCES = {
     "stevenblack": "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
