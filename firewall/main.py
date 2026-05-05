@@ -6,7 +6,7 @@ import threading
 import time
 from firewall import is_blocked, check_flood, log
 from ids import IDSEngine, load_api_key, test_api_key
-from tui import TUI
+from gui import GUI
 from inspection import get_inspector
 
 HOST = "0.0.0.0"
@@ -17,7 +17,7 @@ conn_lock = threading.Lock()
 MAX_CONN = 10
 
 ids_engine: IDSEngine | None = None
-tui_ref: TUI | None = None
+gui_ref: GUI | None = None
 
 
 def start_api(engine):
@@ -212,10 +212,10 @@ def start_proxy():
 
 
 def main():
-    global ids_engine, tui_ref
+    global ids_engine, gui_ref
 
     parser = argparse.ArgumentParser(description="Pocket-Wall Firewall + IDS")
-    parser.add_argument("--tui", action="store_true", help="Launch with TUI dashboard")
+    parser.add_argument("--gui", action="store_true", help="Launch with GUI dashboard")
     parser.add_argument("--web", action="store_true", help="Launch with React web dashboard (API on :5000)")
     parser.add_argument("--no-ids", action="store_true", help="Disable IDS engine")
     parser.add_argument("--test-ids", metavar="IP", nargs="?", const="1.1.1.1", help="Test AbuseIPDB API against a public IP and exit")
@@ -242,18 +242,18 @@ def main():
         log.info("[WEB] Starting REST API on port 5000")
         start_api(ids_engine)
 
-    elif args.tui:
+    elif args.gui:
         if ids_engine is None:
-            print("ERROR: IDS engine required for TUI. Check your .env file for abuse_ipdb_api_key")
+            print("ERROR: IDS engine required for GUI. Check your .env file for abuse_ipdb_api_key")
             sys.exit(1)
 
         proxy_thread = threading.Thread(target=start_proxy, daemon=True)
         proxy_thread.start()
 
-        tui = TUI(ids_engine)
-        tui_ref = tui
+        gui = GUI(ids_engine)
+        gui_ref = gui
         try:
-            curses.wrapper(tui.run)
+            gui.run()
         except KeyboardInterrupt:
             pass
         finally:

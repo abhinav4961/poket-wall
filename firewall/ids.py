@@ -296,7 +296,7 @@ class IDSEngine:
                 data = json.load(f)
             now = time.time()
             for entry in data.get("blocks", []):
-                if now - entry["timestamp"] < entry.get("ttl", CACHE_TTL)):
+                if now - entry["timestamp"] < entry.get("ttl", CACHE_TTL):
                     self._blocked_ips.add(entry["ip"])
         except Exception:
             pass
