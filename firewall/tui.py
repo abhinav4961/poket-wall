@@ -1,21 +1,10 @@
 """
-TUI Dashboard for Pocket-Wall — simple 3-column layout.
-Left: All connections | Middle: Blocked & Warned | Right: AI Analysis
+TUI Dashboard — Blocked Connections + AI Analysis
+Simple 2-panel layout, auto-refresh.
 """
 
 import curses
 import time
-
-SYM_BLOCK = "\u25cf"
-SYM_WARN  = "\u25b2"
-SYM_OK    = "\u2713"
-SYM_LINE  = "\u2500"
-SYM_VLINE = "\u2502"
-SYM_UL    = "\u250c"
-SYM_UR    = "\u2510"
-SYM_LL    = "\u2514"
-SYM_LR    = "\u2518"
-
 
 def _safe(win, y, x, text, attr=0):
     h, w = win.getmaxyx()
@@ -26,27 +15,30 @@ def _safe(win, y, x, text, attr=0):
     except curses.error:
         pass
 
-
-def _hline(win, y, x, w, attr=0):
+def _line(win, y, x, w, attr=0):
     try:
         for i in range(w):
-            win.addch(y, x + i, SYM_LINE, attr)
+            win.addch(y, x + i, "\u2500", attr)
     except curses.error:
         pass
 
+def _vline(win, y, x, h, attr=0):
+    for r in range(y, y + h):
+        try:
+            win.addch(r, x, "\u2502", attr)
+        except curses.error:
+            pass
 
 class TUI:
-
     def __init__(self, ids_engine):
         self.ids = ids_engine
         self._running = True
-        self._s1 = 0
-        self._s2 = 0
+        self._sb = 0
 
     def run(self, stdscr):
         curses.curs_set(0)
         stdscr.nodelay(True)
-        stdscr.timeout(400)
+        stdscr.timeout(500)
 
         curses.start_color()
         curses.use_default_colors()
@@ -57,35 +49,29 @@ class TUI:
         curses.init_pair(5, curses.COLOR_MAGENTA, -1)
         curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_CYAN)
         curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_GREEN)
+        curses.init_pair(8, curses.COLOR_WHITE, curses.COLOR_RED)
 
         while self._running:
             try:
                 stdscr.erase()
                 h, w = stdscr.getmaxyx()
-                if h < 8 or w < 40:
+                if h < 6 or w < 30:
                     _safe(stdscr, 0, 0, "Terminal too small", curses.A_BOLD)
                     stdscr.refresh()
                     if stdscr.getch() == ord('q'):
                         self._running = False
                     continue
-
                 self._draw(stdscr, h, w)
                 stdscr.refresh()
-
                 k = stdscr.getch()
                 if k == ord('q'):
                     self._running = False
                 elif k == curses.KEY_UP:
-                    self._s1 = max(0, self._s1 - 1)
+                    self._sb = max(0, self._sb - 1)
                 elif k == curses.KEY_DOWN:
-                    self._s1 += 1
-                elif k == ord('p'):
-                    self._s2 = max(0, self._s2 - 1)
-                elif k == ord(';'):
-                    self._s2 += 1
+                    self._sb += 1
                 elif k == ord('c'):
                     self.ids.clear_alerts()
-
             except curses.error:
                 pass
             except KeyboardInterrupt:
@@ -96,68 +82,42 @@ class TUI:
         now = time.strftime("%H:%M:%S")
 
         _safe(scr, 0, 0, f" Pocket-Wall  |  {now}".ljust(w), curses.color_pair(6) | curses.A_BOLD)
-        _safe(scr, 1, 2, f"Total:{s.total}  Allowed:{s.allowed}  Blocked:{s.blocked}  Warned:{s.warned}", curses.color_pair(4) | curses.A_BOLD)
-        _hline(scr, 2, 0, w, curses.color_pair(4))
+        _safe(scr, 1, 2, f"Total:{s.total}  Blocked:{s.blocked}  Warned:{s.warned}  Allowed:{s.allowed}", curses.color_pair(4) | curses.A_BOLD)
+        _line(scr, 2, 0, w, curses.color_pair(4))
 
-        c1w = w // 3
-        c2w = (w * 2) // 3
+        mid = w // 2
         top = 3
         ch = h - 7
 
-        _safe(scr, top, 1, " Connections ", curses.color_pair(3) | curses.A_BOLD)
-        _safe(scr, top, c1w + 1, " Blocked/Warned ", curses.color_pair(1) | curses.A_BOLD)
-        _safe(scr, top, c2w + 1, " AI ", curses.color_pair(5) | curses.A_BOLD)
-        for r in range(top + 1, top + ch + 1):
-            try:
-                scr.addch(r, c1w, SYM_VLINE, curses.color_pair(4))
-                scr.addch(r, c2w, SYM_VLINE, curses.color_pair(4))
-            except curses.error:
-                pass
+        _safe(scr, top, 1, " Blocked Connections ", curses.color_pair(1) | curses.A_BOLD)
+        _safe(scr, top, mid + 1, " AI Analysis ", curses.color_pair(5) | curses.A_BOLD)
+        _vline(scr, top, mid, ch + 1, curses.color_pair(4))
 
-        self._col1(scr, top + 1, 1, c1w - 2, ch)
-        self._col2(scr, top + 1, c1w + 2, c2w - c1w - 3, ch)
-        self._col3(scr, top + 1, c2w + 2, w - c2w - 3, ch)
+        self._col_blocks(scr, top + 1, 1, mid - 2, ch)
+        self._col_ai(scr, top + 1, mid + 2, w - mid - 3, ch)
 
         fy = top + ch + 1
-        _hline(scr, fy, 0, w, curses.color_pair(4))
-        _safe(scr, fy + 1, 2, "[q]Quit [c]Clear [Up/Dn]Scroll conns [p/;]Scroll blocked", curses.color_pair(7) | curses.A_BOLD)
+        _line(scr, fy, 0, w, curses.color_pair(4))
+        _safe(scr, fy + 1, 2, "[q]Quit [c]Clear [Up/Dn]Scroll", curses.color_pair(7) | curses.A_BOLD)
         geo = ", ".join(sorted(self.ids.blocked_countries)) or "None"
         _safe(scr, h - 1, 2, f"Geo:{geo}  Blocker:{self.ids.blocker.get_method()}  Threshold:{self.ids.threshold_block}%", curses.color_pair(5))
 
-    def _col1(self, win, y, x, w, h):
-        evts = list(self.ids.events)
-        if not evts:
-            _safe(win, y, x, "Waiting...", curses.color_pair(4))
-            return
-        start = min(self._s1, max(0, len(evts) - h))
-        for i, ev in enumerate(evts[start:start + h]):
-            if i >= h:
-                break
-            ts = time.strftime("%H:%M:%S", time.localtime(ev.timestamp))
-            if ev.action == "BLOCK":
-                sym, clr = SYM_BLOCK, curses.color_pair(1) | curses.A_BOLD
-            elif ev.action == "WARN":
-                sym, clr = SYM_WARN, curses.color_pair(2)
-            else:
-                sym, clr = SYM_OK, curses.color_pair(3)
-            _safe(win, y + i, x, f"{ts} {sym} {ev.ip:<15} {ev.country:>3} {ev.score:>3}% {ev.reason[:w-28]}", clr)
-
-    def _col2(self, win, y, x, w, h):
+    def _col_blocks(self, win, y, x, w, h):
         items = [e for e in self.ids.events if e.action in ("BLOCK", "WARN")]
         if not items:
             _safe(win, y, x, "All clear", curses.color_pair(3))
             return
         items.reverse()
-        start = min(self._s2, max(0, len(items) - h))
+        start = min(self._sb, max(0, len(items) - h))
         for i, ev in enumerate(items[start:start + h]):
             if i >= h:
                 break
             ts = time.strftime("%H:%M:%S", time.localtime(ev.timestamp))
-            sym = SYM_BLOCK if ev.action == "BLOCK" else SYM_WARN
+            sym = "\u25cf" if ev.action == "BLOCK" else "\u25b2"
             clr = curses.color_pair(1) if ev.action == "BLOCK" else curses.color_pair(2)
-            _safe(win, y + i, x, f"{ts} {sym} {ev.ip:<15} S:{ev.score} {ev.reason[:w-24]}", clr | curses.A_BOLD)
+            _safe(win, y + i, x, f"{ts} {sym} {ev.ip:<15} S:{ev.score} {ev.reason[:w-28]}", clr | curses.A_BOLD)
 
-    def _col3(self, win, y, x, w, h):
+    def _col_ai(self, win, y, x, w, h):
         ai = getattr(self.ids, 'ai', None)
         r = y
         if not ai:
@@ -170,7 +130,7 @@ class TUI:
 
         _safe(win, r, x, f"Model:{'ON' if st.get('model_loaded') else 'OFF'}  Alerts:{st.get('total_alerts',0)}", curses.color_pair(4) | curses.A_BOLD)
         r += 1
-        _safe(win, r, x, f"Threshold:{bl.get('threshold',0):.3f}  Mean:{bl.get('mean',0):.3f}", curses.color_pair(5))
+        _safe(win, r, x, f"Threshold:{bl.get('threshold',0):.3f}  Mean:{bl.get('mean',0):.3f}  Std:{bl.get('std',0):.3f}", curses.color_pair(5))
         r += 1
 
         if susp:
